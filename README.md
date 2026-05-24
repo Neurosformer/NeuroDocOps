@@ -105,6 +105,33 @@ Potential technical components:
 - Storage: object storage for files, relational database for metadata and extracted fields
 - Security: tenant isolation, encryption, role-based access, audit logs
 
+## Current Implementation
+
+This repository now includes the first backend foundation for the MVP workflow:
+
+- FastAPI application in `neurodocops/api.py`
+- Typed domain models in `neurodocops/models.py`
+- Infrastructure-free workflow service in `neurodocops/service.py`
+- Tests for document ingestion, classification, extraction, review, and audit events
+- API and architecture notes in `docs/`
+
+Run locally:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+uvicorn neurodocops.api:app --reload
+```
+
+Run tests:
+
+```bash
+pytest
+```
+
+The current service uses in-memory storage by design. The goal is to validate product behavior and API contracts before committing to specific OCR, database, object storage, queue, and model providers.
+
 ## Data Model Ideas
 
 Core entities may include:
