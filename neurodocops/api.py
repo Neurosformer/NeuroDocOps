@@ -4,15 +4,15 @@ from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, status
 
-from neurodocops.models import AuditEvent, DocumentCreate, DocumentRecord, ReviewRequest
-from neurodocops.service import DocumentNotFoundError, DocumentWorkflowService
+from neurodocops.models import AuditEvent, ClaimPacketCreate, ClaimPacketRecord, ExportSummary, ReviewRequest
+from neurodocops.service import ClaimPacketWorkflowService, PacketNotFoundError
 
 
-service = DocumentWorkflowService()
+service = ClaimPacketWorkflowService()
 app = FastAPI(
     title="NeuroDocOps API",
-    version="0.1.0",
-    description="MVP API for regulated document ingestion, extraction review, and audit events.",
+    version="0.2.0",
+    description="Insurance claims packet workflow API for document intake, checklist review, approval, export, and audit events.",
 )
 
 
@@ -21,57 +21,73 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/documents", response_model=DocumentRecord, status_code=status.HTTP_201_CREATED)
-def ingest_document(payload: DocumentCreate) -> DocumentRecord:
-    return service.ingest_document(payload)
+@app.post("/claim-packets", response_model=ClaimPacketRecord, status_code=status.HTTP_201_CREATED)
+def intake_claim_packet(payload: ClaimPacketCreate) -> ClaimPacketRecord:
+    return service.intake_packet(payload)
 
 
-@app.get("/documents", response_model=list[DocumentRecord])
-def list_documents() -> list[DocumentRecord]:
-    return service.list_documents()
+@app.get("/claim-packets", response_model=list[ClaimPacketRecord])
+def list_claim_packets() -> list[ClaimPacketRecord]:
+    return service.list_packets()
 
 
-@app.get("/documents/{document_id}", response_model=DocumentRecord)
-def get_document(document_id: UUID) -> DocumentRecord:
-    return _get_or_404(document_id)
+@app.get("/claim-packets/{packet_id}", response_model=ClaimPacketRecord)
+def get_claim_packet(packet_id: UUID) -> ClaimPacketRecord:
+    return _get_or_404(packet_id)
 
 
-@app.post("/documents/{document_id}/classify", response_model=DocumentRecord)
-def classify_document(document_id: UUID) -> DocumentRecord:
+@app.post("/claim-packets/{packet_id}/classify", response_model=ClaimPacketRecord)
+def classify_claim_packet(packet_id: UUID) -> ClaimPacketRecord:
     try:
-        return service.classify_document(document_id)
-    except DocumentNotFoundError as exc:
-        raise _not_found(document_id) from exc
+        return service.classify_documents(packet_id)
+    except PacketNotFoundError as exc:
+        raise _not_found(packet_id) from exc
 
 
-@app.post("/documents/{document_id}/extract", response_model=DocumentRecord)
-def extract_fields(document_id: UUID) -> DocumentRecord:
+@app.post("/claim-packets/{packet_id}/extract", response_model=ClaimPacketRecord)
+def extract_claim_packet(packet_id: UUID) -> ClaimPacketRecord:
     try:
-        return service.extract_fields(document_id)
-    except DocumentNotFoundError as exc:
-        raise _not_found(document_id) from exc
+        return service.extract_packet(packet_id)
+    except PacketNotFoundError as exc:
+        raise _not_found(packet_id) from exc
 
 
-@app.post("/documents/{document_id}/review", response_model=DocumentRecord)
-def complete_review(document_id: UUID, review: ReviewRequest) -> DocumentRecord:
+@app.post("/claim-packets/{packet_id}/checklist", response_model=ClaimPacketRecord)
+def evaluate_claim_packet_checklist(packet_id: UUID) -> ClaimPacketRecord:
     try:
-        return service.complete_review(document_id, review)
-    except DocumentNotFoundError as exc:
-        raise _not_found(document_id) from exc
+        return service.evaluate_checklist(packet_id)
+    except PacketNotFoundError as exc:
+        raise _not_found(packet_id) from exc
 
 
-@app.get("/documents/{document_id}/audit", response_model=list[AuditEvent])
-def list_document_audit_events(document_id: UUID) -> list[AuditEvent]:
-    _get_or_404(document_id)
-    return service.list_audit_events(document_id)
-
-
-def _get_or_404(document_id: UUID) -> DocumentRecord:
+@app.post("/claim-packets/{packet_id}/review", response_model=ClaimPacketRecord)
+def complete_claim_packet_review(packet_id: UUID, review: ReviewRequest) -> ClaimPacketRecord:
     try:
-        return service.get_document(document_id)
-    except DocumentNotFoundError as exc:
-        raise _not_found(document_id) from exc
+        return service.complete_review(packet_id, review)
+    except PacketNotFoundError as exc:
+        raise _not_found(packet_id) from exc
 
 
-def _not_found(document_id: UUID) -> HTTPException:
-    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Document not found: {document_id}")
+@app.post("/claim-packets/{packet_id}/export", response_model=ExportSummary)
+def export_claim_packet(packet_id: UUID) -> ExportSummary:
+    try:
+        return service.export_packet(packet_id)
+    except PacketNotFoundError as exc:
+        raise _not_found(packet_id) from exc
+
+
+@app.get("/claim-packets/{packet_id}/audit", response_model=list[AuditEvent])
+def list_claim_packet_audit_events(packet_id: UUID) -> list[AuditEvent]:
+    _get_or_404(packet_id)
+    return service.list_audit_events(packet_id)
+
+
+def _get_or_404(packet_id: UUID) -> ClaimPacketRecord:
+    try:
+        return service.get_packet(packet_id)
+    except PacketNotFoundError as exc:
+        raise _not_found(packet_id) from exc
+
+
+def _not_found(packet_id: UUID) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Claim packet not found: {packet_id}")

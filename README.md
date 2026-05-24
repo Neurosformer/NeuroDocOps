@@ -43,17 +43,18 @@ NeuroDocOps provides an AI-powered document operations workflow that can ingest 
 
 ## MVP Scope
 
-The first product should focus on a practical regulated document workflow:
+The first product wedge is **Insurance Claims Packet Ops**. It focuses on claim packets that contain claim forms, incident reports, identity evidence, medical bills, repair invoices, policy documents, photos, and correspondence.
 
-1. Upload PDF, scanned image, or document bundle
-2. Run OCR, layout parsing, and table extraction
-3. Classify document type and business category
-4. Extract important fields into structured JSON
-5. Validate extracted fields with confidence scores and rules
-6. Provide RAG-based question answering with page-level citations
-7. Show a human review screen for correction and approval
-8. Export approved data to CSV, Excel, JSON, webhook, or API
-9. Maintain audit logs for review, edit, export, and access events
+The MVP workflow:
+
+1. Intake a claim packet with claim metadata and source documents
+2. Classify each document in the packet
+3. Extract key fields with confidence scores and source citations
+4. Evaluate a claim completeness checklist
+5. Create review tasks for missing evidence and low-confidence fields
+6. Require human approval before export
+7. Export approved structured data for downstream claims systems
+8. Maintain audit logs for intake, classification, extraction, checklist evaluation, review, and export
 
 ## Key Features
 
@@ -107,13 +108,14 @@ Potential technical components:
 
 ## Current Implementation
 
-This repository now includes the first backend foundation for the MVP workflow:
+This repository includes the first backend foundation for the insurance claims packet workflow:
 
 - FastAPI application in `neurodocops/api.py`
-- Typed domain models in `neurodocops/models.py`
+- Packet-first domain models in `neurodocops/models.py`
 - Infrastructure-free workflow service in `neurodocops/service.py`
-- Tests for document ingestion, classification, extraction, review, and audit events
-- API and architecture notes in `docs/`
+- Claim packet intake, document classification, field extraction, checklist evaluation, review, export, and audit events
+- Tests for the service and API workflow
+- Product research, API notes, and architecture notes in `docs/`
 
 Run locally:
 
@@ -130,7 +132,7 @@ Run tests:
 pytest
 ```
 
-The current service uses in-memory storage by design. The goal is to validate product behavior and API contracts before committing to specific OCR, database, object storage, queue, and model providers.
+The current service uses in-memory storage and fake OCR text by design. The goal is to validate product behavior, packet states, checklist logic, review tasks, audit events, and API contracts before committing to specific OCR, database, object storage, queue, and model providers.
 
 ## Data Model Ideas
 
@@ -138,28 +140,32 @@ Core entities may include:
 
 - `Organization`
 - `Workspace`
+- `Packet`
+- `ClaimPacket`
 - `Document`
 - `DocumentPage`
 - `DocumentType`
 - `ExtractionSchema`
 - `ExtractedField`
+- `ChecklistTemplate`
+- `ChecklistItem`
 - `ValidationRule`
 - `ReviewTask`
 - `Citation`
-- `ComplianceChecklist`
 - `ExportJob`
 - `AuditLog`
 
 ## Success Metrics
 
-- Document processing time reduced compared with manual review
+- Claim packet processing time reduced compared with manual review
+- Manual review time per packet
+- Packet completeness detection rate
+- Missing evidence detection rate
 - Field extraction accuracy after human review
 - Percentage of documents automatically classified
-- Number of manual data-entry hours saved
-- Number of compliance and audit queries answered with citations
-- User correction rate per document type
-- Export error rate into downstream systems
-- Time from document receipt to approved workflow output
+- Reviewer correction rate per document type
+- Export error rate into downstream claims systems
+- Time from claim packet receipt to approved workflow output
 
 ## Compliance and Safety
 
@@ -178,15 +184,15 @@ Important requirements:
 
 ## Roadmap
 
-### Phase 1: Regulated Document MVP
+### Phase 1: Insurance Claims Packet MVP
 
-- Document upload and batch processing
-- OCR and table extraction
-- Basic document classification
-- Structured field extraction
-- Human review UI
-- Citation-backed Q&A
-- CSV, Excel, and JSON export
+- Claim packet intake
+- Document classification
+- Structured field extraction with citations
+- Claim completeness checklist
+- Human review tasks
+- Approval and JSON export
+- Audit event stream
 
 ### Phase 2: Workflow Automation
 

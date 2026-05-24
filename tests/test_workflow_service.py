@@ -1,48 +1,93 @@
-from neurodocops.models import DocumentCreate, DocumentStatus, DocumentType, ReviewDecision, ReviewRequest
-from neurodocops.service import DocumentWorkflowService
+from neurodocops.models import ClaimDocumentCreate, ClaimPacketCreate, DocumentType, PacketStatus, ReviewDecision, ReviewRequest
+from neurodocops.service import ClaimPacketWorkflowService
 
 
-def test_ingest_classify_extract_and_review_invoice_workflow() -> None:
-    service = DocumentWorkflowService()
-    document = service.ingest_document(
-        DocumentCreate(
-            filename="invoice-1001.pdf",
-            text="Invoice 1001 for purchase order PO-445. Amount due 1250 USD.",
+def claim_packet_payload(include_identity: bool = True) -> ClaimPacketCreate:
+    documents = [
+        ClaimDocumentCreate(
+            filename="claim-form.pdf",
+            text="Claim form for claim number CLM-1001 and policy number POL-42.",
+        ),
+        ClaimDocumentCreate(
+            filename="incident-report.pdf",
+            text="Incident report for accident with loss date 2026-05-01.",
+        ),
+        ClaimDocumentCreate(
+            filename="repair-invoice.pdf",
+            text="Repair invoice for vehicle damage. Amount due 1250 USD.",
+        ),
+    ]
+    if include_identity:
+        documents.append(
+            ClaimDocumentCreate(
+                filename="identity.pdf",
+                text="Passport identity document for claimant Amina Rahman.",
+            )
         )
+    return ClaimPacketCreate(
+        claim_reference="CLM-1001",
+        claimant_name="Amina Rahman",
+        loss_type="auto",
+        documents=documents,
     )
 
-    assert document.status == DocumentStatus.INGESTED
 
-    classified = service.classify_document(document.id)
-    assert classified.document_type == DocumentType.INVOICE
-    assert classified.status == DocumentStatus.CLASSIFIED
+def test_claim_packet_workflow_routes_low_confidence_fields_to_review() -> None:
+    service = ClaimPacketWorkflowService()
+    packet = service.intake_packet(claim_packet_payload())
 
-    extracted = service.extract_fields(document.id)
-    assert extracted.status == DocumentStatus.NEEDS_REVIEW
-    assert [field.name for field in extracted.extracted_fields] == ["source_filename", "invoice_summary"]
-    assert extracted.extracted_fields[1].citation.page == 1
+    assert packet.status == PacketStatus.INTAKED
+    assert len(packet.documents) == 4
+
+    classified = service.classify_documents(packet.id)
+    assert [document.document_type for document in classified.documents] == [
+        DocumentType.CLAIM_FORM,
+        DocumentType.INCIDENT_REPORT,
+        DocumentType.REPAIR_INVOICE,
+        DocumentType.IDENTITY_DOCUMENT,
+    ]
+
+    extracted = service.extract_packet(packet.id)
+    assert extracted.status == PacketStatus.EXTRACTED
+    assert all(document.extracted_fields for document in extracted.documents)
+
+    evaluated = service.evaluate_checklist(packet.id)
+    assert evaluated.status == PacketStatus.NEEDS_REVIEW
+    assert len(evaluated.checklist) == 4
+    assert all(item.status.value != "fail" for item in evaluated.checklist[:3])
+    assert evaluated.review_tasks
 
     reviewed = service.complete_review(
-        document.id,
-        ReviewRequest(decision=ReviewDecision.APPROVE, reviewer="ops@example.com", notes="Validated against source PDF"),
+        packet.id,
+        ReviewRequest(decision=ReviewDecision.APPROVE, reviewer="claims.ops@example.com", notes="Validated evidence."),
     )
-    assert reviewed.status == DocumentStatus.APPROVED
+    assert reviewed.status == PacketStatus.APPROVED
+    assert all(task.status.value == "resolved" for task in reviewed.review_tasks)
 
-    audit_events = service.list_audit_events(document.id)
+    export = service.export_packet(packet.id)
+    assert export.status == PacketStatus.EXPORTED
+    assert export.claim_reference == "CLM-1001"
+    assert export.open_review_tasks == 0
+    assert "claim_form.claim_summary" in export.fields
+
+    audit_events = service.list_audit_events(packet.id)
     assert [event.action.value for event in audit_events] == [
-        "document_ingested",
-        "document_classified",
+        "packet_intaked",
+        "documents_classified",
         "fields_extracted",
+        "checklist_evaluated",
         "review_completed",
+        "packet_exported",
     ]
 
 
-def test_unknown_document_type_routes_to_review() -> None:
-    service = DocumentWorkflowService()
-    document = service.ingest_document(DocumentCreate(filename="notes.pdf", text="Miscellaneous uploaded notes."))
+def test_missing_identity_document_creates_checklist_review_task() -> None:
+    service = ClaimPacketWorkflowService()
+    packet = service.intake_packet(claim_packet_payload(include_identity=False))
 
-    extracted = service.extract_fields(document.id)
+    evaluated = service.evaluate_checklist(packet.id)
 
-    assert extracted.document_type == DocumentType.UNKNOWN
-    assert extracted.status == DocumentStatus.NEEDS_REVIEW
-    assert extracted.extracted_fields[1].confidence < 0.6
+    failed_items = [item for item in evaluated.checklist if item.status.value == "fail"]
+    assert len(failed_items) == 1
+    assert failed_items[0].required_document_type == DocumentType.IDENTITY_DOCUMENT
+    assert any("Claimant identity evidence present" in task.reason for task in evaluated.review_tasks)

@@ -5,114 +5,160 @@ from uuid import UUID
 from neurodocops.models import (
     AuditAction,
     AuditEvent,
+    ChecklistItem,
+    ChecklistStatus,
     Citation,
-    DocumentCreate,
-    DocumentRecord,
-    DocumentStatus,
+    ClaimDocumentRecord,
+    ClaimPacketCreate,
+    ClaimPacketRecord,
     DocumentType,
+    ExportSummary,
     ExtractedField,
+    PacketStatus,
     ReviewDecision,
     ReviewRequest,
+    ReviewTask,
+    ReviewTaskStatus,
+    utc_now,
 )
 
 
-class DocumentNotFoundError(LookupError):
+class PacketNotFoundError(LookupError):
     pass
 
 
-class DocumentWorkflowService:
-    """In-memory MVP workflow service.
-
-    This is intentionally infrastructure-free so product behavior can be tested
-    before choosing storage, OCR, queue, and model vendors.
-    """
+class ClaimPacketWorkflowService:
+    """In-memory insurance claims packet workflow service."""
 
     def __init__(self) -> None:
-        self._documents: dict[UUID, DocumentRecord] = {}
+        self._packets: dict[UUID, ClaimPacketRecord] = {}
         self._audit_events: list[AuditEvent] = []
 
-    def ingest_document(self, payload: DocumentCreate) -> DocumentRecord:
-        document = DocumentRecord(**payload.model_dump())
-        self._documents[document.id] = document
-        self._audit(document.id, AuditAction.DOCUMENT_INGESTED, detail={"filename": document.filename})
-        return document
+    def intake_packet(self, payload: ClaimPacketCreate) -> ClaimPacketRecord:
+        packet = ClaimPacketRecord(
+            claim_reference=payload.claim_reference,
+            claimant_name=payload.claimant_name,
+            loss_type=payload.loss_type,
+            metadata=payload.metadata,
+            documents=[ClaimDocumentRecord(**document.model_dump()) for document in payload.documents],
+        )
+        self._packets[packet.id] = packet
+        self._audit(packet.id, AuditAction.PACKET_INTAKED, detail={"claim_reference": packet.claim_reference})
+        return packet
 
-    def list_documents(self) -> list[DocumentRecord]:
-        return sorted(self._documents.values(), key=lambda document: document.created_at)
+    def list_packets(self) -> list[ClaimPacketRecord]:
+        return sorted(self._packets.values(), key=lambda packet: packet.created_at)
 
-    def get_document(self, document_id: UUID) -> DocumentRecord:
+    def get_packet(self, packet_id: UUID) -> ClaimPacketRecord:
         try:
-            return self._documents[document_id]
+            return self._packets[packet_id]
         except KeyError as exc:
-            raise DocumentNotFoundError(str(document_id)) from exc
+            raise PacketNotFoundError(str(packet_id)) from exc
 
-    def classify_document(self, document_id: UUID) -> DocumentRecord:
-        document = self.get_document(document_id)
-        lowered = document.text.lower()
-
-        if any(token in lowered for token in ["claim", "policy", "incident"]):
-            document.document_type = DocumentType.CLAIM_FORM
-        elif any(token in lowered for token in ["invoice", "amount due", "purchase order"]):
-            document.document_type = DocumentType.INVOICE
-        elif any(token in lowered for token in ["agreement", "contract", "termination"]):
-            document.document_type = DocumentType.CONTRACT
-        elif any(token in lowered for token in ["passport", "national id", "identity"]):
-            document.document_type = DocumentType.IDENTITY_DOCUMENT
-        elif any(token in lowered for token in ["audit", "compliance", "regulation"]):
-            document.document_type = DocumentType.COMPLIANCE_REPORT
-        else:
-            document.document_type = DocumentType.UNKNOWN
-
-        document.status = DocumentStatus.CLASSIFIED
-        document.touch()
+    def classify_documents(self, packet_id: UUID) -> ClaimPacketRecord:
+        packet = self.get_packet(packet_id)
+        for document in packet.documents:
+            document.document_type = self._classify_document(document.text)
+        packet.status = PacketStatus.CLASSIFIED
+        packet.touch()
         self._audit(
-            document.id,
-            AuditAction.DOCUMENT_CLASSIFIED,
-            detail={"document_type": document.document_type.value},
+            packet.id,
+            AuditAction.DOCUMENTS_CLASSIFIED,
+            detail={"document_types": [document.document_type.value for document in packet.documents]},
         )
-        return document
+        return packet
 
-    def extract_fields(self, document_id: UUID) -> DocumentRecord:
-        document = self.get_document(document_id)
-        if document.status == DocumentStatus.INGESTED:
-            self.classify_document(document_id)
+    def extract_packet(self, packet_id: UUID) -> ClaimPacketRecord:
+        packet = self.get_packet(packet_id)
+        if packet.status == PacketStatus.INTAKED:
+            self.classify_documents(packet_id)
 
-        document.extracted_fields = self._extract_fields_for_type(document)
-        document.status = (
-            DocumentStatus.NEEDS_REVIEW
-            if any(field.confidence < 0.85 for field in document.extracted_fields)
-            else DocumentStatus.EXTRACTED
-        )
-        document.touch()
+        for document in packet.documents:
+            document.extracted_fields = self._extract_fields(document)
+
+        packet.status = PacketStatus.EXTRACTED
+        packet.touch()
+        self._audit(packet.id, AuditAction.FIELDS_EXTRACTED, detail={"field_count": self._field_count(packet)})
+        return packet
+
+    def evaluate_checklist(self, packet_id: UUID) -> ClaimPacketRecord:
+        packet = self.get_packet(packet_id)
+        if packet.status in {PacketStatus.INTAKED, PacketStatus.CLASSIFIED}:
+            self.extract_packet(packet_id)
+
+        packet.checklist = self._build_claim_checklist(packet)
+        packet.review_tasks = self._build_review_tasks(packet)
+        packet.status = PacketStatus.NEEDS_REVIEW if packet.review_tasks else PacketStatus.APPROVED
+        packet.touch()
         self._audit(
-            document.id,
-            AuditAction.FIELDS_EXTRACTED,
-            detail={"field_count": len(document.extracted_fields), "status": document.status.value},
+            packet.id,
+            AuditAction.CHECKLIST_EVALUATED,
+            detail={"open_review_tasks": len(packet.review_tasks), "status": packet.status.value},
         )
-        return document
+        return packet
 
-    def complete_review(self, document_id: UUID, review: ReviewRequest) -> DocumentRecord:
-        document = self.get_document(document_id)
-        document.status = (
-            DocumentStatus.APPROVED
-            if review.decision == ReviewDecision.APPROVE
-            else DocumentStatus.NEEDS_REVIEW
-        )
-        document.touch()
+    def complete_review(self, packet_id: UUID, review: ReviewRequest) -> ClaimPacketRecord:
+        packet = self.get_packet(packet_id)
+        for task in packet.review_tasks:
+            if task.status == ReviewTaskStatus.OPEN:
+                task.status = ReviewTaskStatus.RESOLVED
+                task.resolved_at = utc_now()
+                task.reviewer = review.reviewer
+                task.notes = review.notes
+
+        packet.status = PacketStatus.APPROVED if review.decision == ReviewDecision.APPROVE else PacketStatus.NEEDS_REVIEW
+        packet.touch()
         self._audit(
-            document.id,
+            packet.id,
             AuditAction.REVIEW_COMPLETED,
             actor=review.reviewer,
             detail={"decision": review.decision.value, "notes": review.notes},
         )
-        return document
+        return packet
 
-    def list_audit_events(self, document_id: UUID | None = None) -> list[AuditEvent]:
-        if document_id is None:
+    def export_packet(self, packet_id: UUID) -> ExportSummary:
+        packet = self.get_packet(packet_id)
+        fields = {
+            f"{document.document_type.value}.{field.name}": field.value
+            for document in packet.documents
+            for field in document.extracted_fields
+        }
+        packet.status = PacketStatus.EXPORTED
+        packet.touch()
+        self._audit(packet.id, AuditAction.PACKET_EXPORTED, detail={"field_count": len(fields)})
+        return ExportSummary(
+            packet_id=packet.id,
+            claim_reference=packet.claim_reference,
+            status=packet.status,
+            document_count=len(packet.documents),
+            checklist_passed=sum(item.status == ChecklistStatus.PASS for item in packet.checklist),
+            checklist_failed=sum(item.status == ChecklistStatus.FAIL for item in packet.checklist),
+            open_review_tasks=sum(task.status == ReviewTaskStatus.OPEN for task in packet.review_tasks),
+            fields=fields,
+        )
+
+    def list_audit_events(self, packet_id: UUID | None = None) -> list[AuditEvent]:
+        if packet_id is None:
             return list(self._audit_events)
-        return [event for event in self._audit_events if event.document_id == document_id]
+        return [event for event in self._audit_events if event.packet_id == packet_id]
 
-    def _extract_fields_for_type(self, document: DocumentRecord) -> list[ExtractedField]:
+    def _classify_document(self, text: str) -> DocumentType:
+        lowered = text.lower()
+        if any(token in lowered for token in ["claim form", "claim number", "policy number"]):
+            return DocumentType.CLAIM_FORM
+        if any(token in lowered for token in ["medical bill", "clinic", "hospital", "treatment"]):
+            return DocumentType.MEDICAL_BILL
+        if any(token in lowered for token in ["repair invoice", "amount due", "invoice"]):
+            return DocumentType.REPAIR_INVOICE
+        if any(token in lowered for token in ["passport", "national id", "identity", "driver license"]):
+            return DocumentType.IDENTITY_DOCUMENT
+        if any(token in lowered for token in ["incident report", "accident", "loss date"]):
+            return DocumentType.INCIDENT_REPORT
+        if any(token in lowered for token in ["policy schedule", "coverage", "deductible"]):
+            return DocumentType.POLICY_DOCUMENT
+        return DocumentType.UNKNOWN
+
+    def _extract_fields(self, document: ClaimDocumentRecord) -> list[ExtractedField]:
         text = " ".join(document.text.split())
         snippet = text[:180] or document.filename
         common = [
@@ -120,33 +166,79 @@ class DocumentWorkflowService:
                 name="source_filename",
                 value=document.filename,
                 confidence=0.99,
-                citation=Citation(page=1, snippet=document.filename),
+                citation=Citation(document_id=document.id, page=1, snippet=document.filename),
+            )
+        ]
+        field_name_by_type = {
+            DocumentType.CLAIM_FORM: "claim_summary",
+            DocumentType.MEDICAL_BILL: "medical_bill_summary",
+            DocumentType.REPAIR_INVOICE: "repair_invoice_summary",
+            DocumentType.IDENTITY_DOCUMENT: "identity_summary",
+            DocumentType.INCIDENT_REPORT: "incident_summary",
+            DocumentType.POLICY_DOCUMENT: "policy_summary",
+            DocumentType.UNKNOWN: "document_summary",
+        }
+        confidence = 0.78 if document.document_type != DocumentType.UNKNOWN else 0.52
+        return common + [
+            ExtractedField(
+                name=field_name_by_type[document.document_type],
+                value=snippet,
+                confidence=confidence,
+                citation=Citation(document_id=document.id, page=1, snippet=snippet),
             )
         ]
 
-        if document.document_type == DocumentType.INVOICE:
-            return common + [
-                ExtractedField(name="invoice_summary", value=snippet, confidence=0.72, citation=Citation(page=1, snippet=snippet))
-            ]
-        if document.document_type == DocumentType.CLAIM_FORM:
-            return common + [
-                ExtractedField(name="claim_summary", value=snippet, confidence=0.7, citation=Citation(page=1, snippet=snippet))
-            ]
-        if document.document_type == DocumentType.CONTRACT:
-            return common + [
-                ExtractedField(name="contract_summary", value=snippet, confidence=0.68, citation=Citation(page=1, snippet=snippet))
-            ]
-        return common + [
-            ExtractedField(name="document_summary", value=snippet, confidence=0.55, citation=Citation(page=1, snippet=snippet))
+    def _build_claim_checklist(self, packet: ClaimPacketRecord) -> list[ChecklistItem]:
+        present_types = {document.document_type for document in packet.documents}
+        required = [
+            (DocumentType.CLAIM_FORM, "Claim form present"),
+            (DocumentType.IDENTITY_DOCUMENT, "Claimant identity evidence present"),
+            (DocumentType.INCIDENT_REPORT, "Incident or loss report present"),
         ]
+        checklist = [
+            ChecklistItem(
+                name=name,
+                required_document_type=document_type,
+                status=ChecklistStatus.PASS if document_type in present_types else ChecklistStatus.FAIL,
+                detail="Evidence found" if document_type in present_types else "Required evidence missing",
+            )
+            for document_type, name in required
+        ]
+        low_confidence = any(field.confidence < 0.85 for document in packet.documents for field in document.extracted_fields)
+        checklist.append(
+            ChecklistItem(
+                name="Field confidence review",
+                status=ChecklistStatus.NEEDS_REVIEW if low_confidence else ChecklistStatus.PASS,
+                detail="One or more extracted fields need reviewer validation" if low_confidence else "All fields are high confidence",
+            )
+        )
+        return checklist
+
+    def _build_review_tasks(self, packet: ClaimPacketRecord) -> list[ReviewTask]:
+        tasks = [
+            ReviewTask(reason=f"Checklist failed: {item.name}")
+            for item in packet.checklist
+            if item.status == ChecklistStatus.FAIL
+        ]
+        for document in packet.documents:
+            for field in document.extracted_fields:
+                if field.confidence < 0.85:
+                    tasks.append(
+                        ReviewTask(
+                            document_id=document.id,
+                            reason=f"Validate low-confidence field: {field.name}",
+                        )
+                    )
+        return tasks
+
+    def _field_count(self, packet: ClaimPacketRecord) -> int:
+        return sum(len(document.extracted_fields) for document in packet.documents)
 
     def _audit(
         self,
-        document_id: UUID,
+        packet_id: UUID,
         action: AuditAction,
         actor: str = "system",
         detail: dict[str, object] | None = None,
     ) -> None:
-        self._audit_events.append(
-            AuditEvent(document_id=document_id, action=action, actor=actor, detail=detail or {})
-        )
+        self._audit_events.append(AuditEvent(packet_id=packet_id, action=action, actor=actor, detail=detail or {}))
