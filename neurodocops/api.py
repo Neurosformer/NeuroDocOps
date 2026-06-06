@@ -3,9 +3,10 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 
 from neurodocops.models import AuditEvent, ClaimPacketCreate, ClaimPacketRecord, ExportSummary, ReviewRequest
-from neurodocops.service import ClaimPacketWorkflowService, PacketNotFoundError
+from neurodocops.service import ClaimPacketWorkflowService, PacketNotFoundError, WorkflowConflictError
 
 
 service = ClaimPacketWorkflowService()
@@ -13,6 +14,13 @@ app = FastAPI(
     title="NeuroDocOps API",
     version="0.2.0",
     description="Insurance claims packet workflow API for document intake, checklist review, approval, export, and audit events.",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -66,6 +74,8 @@ def complete_claim_packet_review(packet_id: UUID, review: ReviewRequest) -> Clai
         return service.complete_review(packet_id, review)
     except PacketNotFoundError as exc:
         raise _not_found(packet_id) from exc
+    except WorkflowConflictError as exc:
+        raise _conflict(str(exc)) from exc
 
 
 @app.post("/claim-packets/{packet_id}/export", response_model=ExportSummary)
@@ -74,6 +84,8 @@ def export_claim_packet(packet_id: UUID) -> ExportSummary:
         return service.export_packet(packet_id)
     except PacketNotFoundError as exc:
         raise _not_found(packet_id) from exc
+    except WorkflowConflictError as exc:
+        raise _conflict(str(exc)) from exc
 
 
 @app.get("/claim-packets/{packet_id}/audit", response_model=list[AuditEvent])
@@ -91,3 +103,7 @@ def _get_or_404(packet_id: UUID) -> ClaimPacketRecord:
 
 def _not_found(packet_id: UUID) -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Claim packet not found: {packet_id}")
+
+
+def _conflict(detail: str) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)

@@ -1,5 +1,7 @@
+import pytest
+
 from neurodocops.models import ClaimDocumentCreate, ClaimPacketCreate, DocumentType, PacketStatus, ReviewDecision, ReviewRequest
-from neurodocops.service import ClaimPacketWorkflowService
+from neurodocops.service import ClaimPacketWorkflowService, WorkflowConflictError
 
 
 def claim_packet_payload(include_identity: bool = True) -> ClaimPacketCreate:
@@ -50,11 +52,14 @@ def test_claim_packet_workflow_routes_low_confidence_fields_to_review() -> None:
     extracted = service.extract_packet(packet.id)
     assert extracted.status == PacketStatus.EXTRACTED
     assert all(document.extracted_fields for document in extracted.documents)
+    assert {document.ocr_provider for document in extracted.documents} == {"mock-ocr"}
+    assert all(document.ocr_text for document in extracted.documents)
+    assert any(field.name == "ocr_provider" for document in extracted.documents for field in document.extracted_fields)
 
     evaluated = service.evaluate_checklist(packet.id)
     assert evaluated.status == PacketStatus.NEEDS_REVIEW
-    assert len(evaluated.checklist) == 4
-    assert all(item.status.value != "fail" for item in evaluated.checklist[:3])
+    assert len(evaluated.checklist) == 5
+    assert all(item.status.value != "fail" for item in evaluated.checklist[:4])
     assert evaluated.review_tasks
 
     reviewed = service.complete_review(
@@ -68,7 +73,8 @@ def test_claim_packet_workflow_routes_low_confidence_fields_to_review() -> None:
     assert export.status == PacketStatus.EXPORTED
     assert export.claim_reference == "CLM-1001"
     assert export.open_review_tasks == 0
-    assert "claim_form.claim_summary" in export.fields
+    assert any(field.name == "claim_number" for document in export.documents for field in document.extracted_fields)
+    assert any(field.name == "policy_number" for document in export.documents for field in document.extracted_fields)
 
     audit_events = service.list_audit_events(packet.id)
     assert [event.action.value for event in audit_events] == [
@@ -91,3 +97,52 @@ def test_missing_identity_document_creates_checklist_review_task() -> None:
     assert len(failed_items) == 1
     assert failed_items[0].required_document_type == DocumentType.IDENTITY_DOCUMENT
     assert any("Claimant identity evidence present" in task.reason for task in evaluated.review_tasks)
+
+
+def test_export_requires_approval() -> None:
+    service = ClaimPacketWorkflowService()
+    packet = service.intake_packet(claim_packet_payload())
+
+    with pytest.raises(WorkflowConflictError, match="approved"):
+        service.export_packet(packet.id)
+
+
+def test_review_requires_checklist_evaluation() -> None:
+    service = ClaimPacketWorkflowService()
+    packet = service.intake_packet(claim_packet_payload())
+
+    with pytest.raises(WorkflowConflictError, match="Checklist"):
+        service.complete_review(
+            packet.id,
+            ReviewRequest(decision=ReviewDecision.APPROVE, reviewer="claims.ops@example.com"),
+        )
+
+
+def test_request_changes_keeps_packet_in_review_with_open_task() -> None:
+    service = ClaimPacketWorkflowService()
+    packet = service.intake_packet(claim_packet_payload())
+    service.evaluate_checklist(packet.id)
+
+    reviewed = service.complete_review(
+        packet.id,
+        ReviewRequest(decision=ReviewDecision.REQUEST_CHANGES, reviewer="claims.ops@example.com", notes="Need repair total."),
+    )
+
+    assert reviewed.status == PacketStatus.NEEDS_REVIEW
+    assert any(task.status.value == "open" for task in reviewed.review_tasks)
+
+
+def test_auto_loss_requires_repair_invoice() -> None:
+    service = ClaimPacketWorkflowService()
+    documents = [
+        ClaimDocumentCreate(filename="claim-form.pdf", text="Claim form for claim number CLM-1001 and policy number POL-42."),
+        ClaimDocumentCreate(filename="incident-report.pdf", text="Incident report for accident with loss date 2026-05-01."),
+        ClaimDocumentCreate(filename="identity.pdf", text="Passport identity document for claimant Amina Rahman."),
+    ]
+    packet = service.intake_packet(
+        ClaimPacketCreate(claim_reference="CLM-1001", claimant_name="Amina Rahman", loss_type="auto", documents=documents)
+    )
+
+    evaluated = service.evaluate_checklist(packet.id)
+
+    assert any(item.required_document_type == DocumentType.REPAIR_INVOICE for item in evaluated.checklist if item.status.value == "fail")

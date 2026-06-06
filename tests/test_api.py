@@ -47,7 +47,30 @@ def test_claim_packet_api_happy_path() -> None:
     assert export_response.status_code == 200
     assert export_response.json()["status"] == "exported"
     assert export_response.json()["open_review_tasks"] == 0
+    assert export_response.json()["documents"]
 
     audit_response = client.get(f"/claim-packets/{packet_id}/audit")
     assert audit_response.status_code == 200
     assert len(audit_response.json()) == 6
+
+
+def test_api_export_before_approval_returns_conflict() -> None:
+    client = TestClient(app)
+
+    create_response = client.post(
+        "/claim-packets",
+        json={
+            "claim_reference": "CLM-3003",
+            "claimant_name": "Morgan Fox",
+            "loss_type": "auto",
+            "documents": [
+                {"filename": "claim-form.pdf", "text": "Claim form with claim number CLM-3003 and policy number P-300."}
+            ],
+        },
+    )
+    packet_id = create_response.json()["id"]
+
+    export_response = client.post(f"/claim-packets/{packet_id}/export")
+
+    assert export_response.status_code == 409
+    assert "approved" in export_response.json()["detail"]

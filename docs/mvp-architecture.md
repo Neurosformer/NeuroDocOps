@@ -7,12 +7,21 @@ NeuroDocOps starts as an insurance claims packet workflow engine, not a generic 
 ```text
 FastAPI API
   -> ClaimPacketWorkflowService
+  -> OCRProvider contract
+  -> ExtractionProvider contract
   -> In-memory packet store
   -> In-memory audit event stream
   -> Pydantic domain models
 ```
 
 The in-memory service is intentional for the first milestone. It lets the team validate workflow behavior, API contracts, review states, checklist logic, and audit requirements before committing to database, OCR, queue, storage, and model providers.
+
+The provider boundary is already present:
+
+- `OCRProvider` normalizes OCR/layout output from a source document.
+- `ExtractionProvider` classifies documents and returns extracted fields with citations.
+- `MockOCRProvider` keeps tests deterministic while preserving the future Azure/Google/AWS adapter shape.
+- `RuleBasedInsuranceExtractionProvider` contains the current deterministic insurance rules and can be replaced by provider + LLM extraction later.
 
 ## Product Loop
 
@@ -41,7 +50,7 @@ GET  /claim-packets/{packet_id}/audit
 
 - Replace in-memory storage with Postgres.
 - Add object storage for original documents and page images.
-- Add OCR adapters for Azure Document Intelligence, Google Document AI, AWS Textract, or open-source OCR.
+- Replace `MockOCRProvider` with Azure Document Intelligence first, then Google Document AI, AWS Textract, or open-source OCR.
 - Add async processing for large files and batches.
 - Add tenant-aware authentication and role-based access control.
 - Add export jobs for CSV, Excel, JSON, webhooks, and claims-system API integrations.

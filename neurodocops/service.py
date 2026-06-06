@@ -7,13 +7,11 @@ from neurodocops.models import (
     AuditEvent,
     ChecklistItem,
     ChecklistStatus,
-    Citation,
     ClaimDocumentRecord,
     ClaimPacketCreate,
     ClaimPacketRecord,
     DocumentType,
     ExportSummary,
-    ExtractedField,
     PacketStatus,
     ReviewDecision,
     ReviewRequest,
@@ -21,18 +19,30 @@ from neurodocops.models import (
     ReviewTaskStatus,
     utc_now,
 )
+from neurodocops.models import OCRResult
+from neurodocops.providers import ExtractionProvider, MockOCRProvider, OCRProvider, RuleBasedInsuranceExtractionProvider
 
 
 class PacketNotFoundError(LookupError):
     pass
 
 
+class WorkflowConflictError(RuntimeError):
+    pass
+
+
 class ClaimPacketWorkflowService:
     """In-memory insurance claims packet workflow service."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        ocr_provider: OCRProvider | None = None,
+        extraction_provider: ExtractionProvider | None = None,
+    ) -> None:
         self._packets: dict[UUID, ClaimPacketRecord] = {}
         self._audit_events: list[AuditEvent] = []
+        self._ocr_provider = ocr_provider or MockOCRProvider()
+        self._extraction_provider = extraction_provider or RuleBasedInsuranceExtractionProvider()
 
     def intake_packet(self, payload: ClaimPacketCreate) -> ClaimPacketRecord:
         packet = ClaimPacketRecord(
@@ -58,7 +68,8 @@ class ClaimPacketWorkflowService:
     def classify_documents(self, packet_id: UUID) -> ClaimPacketRecord:
         packet = self.get_packet(packet_id)
         for document in packet.documents:
-            document.document_type = self._classify_document(document.text)
+            ocr = self._parse_document(document)
+            document.document_type = self._extraction_provider.classify_document(document, ocr)
         packet.status = PacketStatus.CLASSIFIED
         packet.touch()
         self._audit(
@@ -74,7 +85,8 @@ class ClaimPacketWorkflowService:
             self.classify_documents(packet_id)
 
         for document in packet.documents:
-            document.extracted_fields = self._extract_fields(document)
+            ocr = self._parse_document(document)
+            document.extracted_fields = self._extraction_provider.extract_fields(document, ocr)
 
         packet.status = PacketStatus.EXTRACTED
         packet.touch()
@@ -99,14 +111,21 @@ class ClaimPacketWorkflowService:
 
     def complete_review(self, packet_id: UUID, review: ReviewRequest) -> ClaimPacketRecord:
         packet = self.get_packet(packet_id)
-        for task in packet.review_tasks:
-            if task.status == ReviewTaskStatus.OPEN:
-                task.status = ReviewTaskStatus.RESOLVED
-                task.resolved_at = utc_now()
-                task.reviewer = review.reviewer
-                task.notes = review.notes
+        if not packet.checklist:
+            raise WorkflowConflictError("Checklist must be evaluated before review.")
 
-        packet.status = PacketStatus.APPROVED if review.decision == ReviewDecision.APPROVE else PacketStatus.NEEDS_REVIEW
+        if review.decision == ReviewDecision.APPROVE:
+            for task in packet.review_tasks:
+                if task.status == ReviewTaskStatus.OPEN:
+                    task.status = ReviewTaskStatus.RESOLVED
+                    task.resolved_at = utc_now()
+                    task.reviewer = review.reviewer
+                    task.notes = review.notes
+            packet.status = PacketStatus.APPROVED
+        else:
+            if not any(task.status == ReviewTaskStatus.OPEN for task in packet.review_tasks):
+                packet.review_tasks.append(ReviewTask(reason="Reviewer requested changes"))
+            packet.status = PacketStatus.NEEDS_REVIEW
         packet.touch()
         self._audit(
             packet.id,
@@ -118,8 +137,14 @@ class ClaimPacketWorkflowService:
 
     def export_packet(self, packet_id: UUID) -> ExportSummary:
         packet = self.get_packet(packet_id)
+        open_review_tasks = sum(task.status == ReviewTaskStatus.OPEN for task in packet.review_tasks)
+        if packet.status != PacketStatus.APPROVED:
+            raise WorkflowConflictError("Claim packet must be approved before export.")
+        if open_review_tasks:
+            raise WorkflowConflictError("Open review tasks must be resolved before export.")
+
         fields = {
-            f"{document.document_type.value}.{field.name}": field.value
+            f"{document.document_type.value}.{document.id}.{field.name}": field.value
             for document in packet.documents
             for field in document.extracted_fields
         }
@@ -129,12 +154,24 @@ class ClaimPacketWorkflowService:
         return ExportSummary(
             packet_id=packet.id,
             claim_reference=packet.claim_reference,
+            claimant_name=packet.claimant_name,
+            loss_type=packet.loss_type,
             status=packet.status,
             document_count=len(packet.documents),
             checklist_passed=sum(item.status == ChecklistStatus.PASS for item in packet.checklist),
             checklist_failed=sum(item.status == ChecklistStatus.FAIL for item in packet.checklist),
-            open_review_tasks=sum(task.status == ReviewTaskStatus.OPEN for task in packet.review_tasks),
+            open_review_tasks=open_review_tasks,
             fields=fields,
+            documents=[
+                {
+                    "document_id": document.id,
+                    "filename": document.filename,
+                    "document_type": document.document_type,
+                    "extracted_fields": document.extracted_fields,
+                }
+                for document in packet.documents
+            ],
+            checklist=packet.checklist,
         )
 
     def list_audit_events(self, packet_id: UUID | None = None) -> list[AuditEvent]:
@@ -142,51 +179,11 @@ class ClaimPacketWorkflowService:
             return list(self._audit_events)
         return [event for event in self._audit_events if event.packet_id == packet_id]
 
-    def _classify_document(self, text: str) -> DocumentType:
-        lowered = text.lower()
-        if any(token in lowered for token in ["claim form", "claim number", "policy number"]):
-            return DocumentType.CLAIM_FORM
-        if any(token in lowered for token in ["medical bill", "clinic", "hospital", "treatment"]):
-            return DocumentType.MEDICAL_BILL
-        if any(token in lowered for token in ["repair invoice", "amount due", "invoice"]):
-            return DocumentType.REPAIR_INVOICE
-        if any(token in lowered for token in ["passport", "national id", "identity", "driver license"]):
-            return DocumentType.IDENTITY_DOCUMENT
-        if any(token in lowered for token in ["incident report", "accident", "loss date"]):
-            return DocumentType.INCIDENT_REPORT
-        if any(token in lowered for token in ["policy schedule", "coverage", "deductible"]):
-            return DocumentType.POLICY_DOCUMENT
-        return DocumentType.UNKNOWN
-
-    def _extract_fields(self, document: ClaimDocumentRecord) -> list[ExtractedField]:
-        text = " ".join(document.text.split())
-        snippet = text[:180] or document.filename
-        common = [
-            ExtractedField(
-                name="source_filename",
-                value=document.filename,
-                confidence=0.99,
-                citation=Citation(document_id=document.id, page=1, snippet=document.filename),
-            )
-        ]
-        field_name_by_type = {
-            DocumentType.CLAIM_FORM: "claim_summary",
-            DocumentType.MEDICAL_BILL: "medical_bill_summary",
-            DocumentType.REPAIR_INVOICE: "repair_invoice_summary",
-            DocumentType.IDENTITY_DOCUMENT: "identity_summary",
-            DocumentType.INCIDENT_REPORT: "incident_summary",
-            DocumentType.POLICY_DOCUMENT: "policy_summary",
-            DocumentType.UNKNOWN: "document_summary",
-        }
-        confidence = 0.78 if document.document_type != DocumentType.UNKNOWN else 0.52
-        return common + [
-            ExtractedField(
-                name=field_name_by_type[document.document_type],
-                value=snippet,
-                confidence=confidence,
-                citation=Citation(document_id=document.id, page=1, snippet=snippet),
-            )
-        ]
+    def _parse_document(self, document: ClaimDocumentRecord) -> OCRResult:
+        ocr = self._ocr_provider.parse_document(document)
+        document.ocr_provider = ocr.provider
+        document.ocr_text = ocr.text
+        return ocr
 
     def _build_claim_checklist(self, packet: ClaimPacketRecord) -> list[ChecklistItem]:
         present_types = {document.document_type for document in packet.documents}
@@ -195,6 +192,11 @@ class ClaimPacketWorkflowService:
             (DocumentType.IDENTITY_DOCUMENT, "Claimant identity evidence present"),
             (DocumentType.INCIDENT_REPORT, "Incident or loss report present"),
         ]
+        loss_type = packet.loss_type.lower()
+        if any(token in loss_type for token in ["auto", "property", "vehicle"]):
+            required.append((DocumentType.REPAIR_INVOICE, "Repair estimate or invoice present"))
+        if any(token in loss_type for token in ["medical", "injury", "health"]):
+            required.append((DocumentType.MEDICAL_BILL, "Medical bill or treatment evidence present"))
         checklist = [
             ChecklistItem(
                 name=name,

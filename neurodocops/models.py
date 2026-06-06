@@ -60,6 +60,18 @@ class ExtractedField(BaseModel):
     citation: Citation
 
 
+class OCRPage(BaseModel):
+    page: int = Field(default=1, ge=1)
+    text: str = Field(min_length=1)
+
+
+class OCRResult(BaseModel):
+    provider: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    pages: list[OCRPage] = Field(min_length=1)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class ClaimDocumentCreate(BaseModel):
     filename: str = Field(min_length=1)
     text: str = Field(min_length=1, description="OCR or extracted text for the MVP workflow")
@@ -81,6 +93,8 @@ class ClaimDocumentRecord(BaseModel):
     text: str
     content_type: str = "application/pdf"
     metadata: dict[str, Any] = Field(default_factory=dict)
+    ocr_provider: str | None = None
+    ocr_text: str | None = None
     document_type: DocumentType = DocumentType.UNKNOWN
     extracted_fields: list[ExtractedField] = Field(default_factory=list)
 
@@ -126,15 +140,26 @@ class ReviewRequest(BaseModel):
     notes: str | None = None
 
 
+class ExportedDocument(BaseModel):
+    document_id: UUID
+    filename: str
+    document_type: DocumentType
+    extracted_fields: list[ExtractedField]
+
+
 class ExportSummary(BaseModel):
     packet_id: UUID
     claim_reference: str
+    claimant_name: str
+    loss_type: str
     status: PacketStatus
     document_count: int
     checklist_passed: int
     checklist_failed: int
     open_review_tasks: int
     fields: dict[str, str]
+    documents: list[ExportedDocument]
+    checklist: list[ChecklistItem]
 
 
 class AuditAction(str, Enum):

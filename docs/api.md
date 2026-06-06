@@ -1,6 +1,6 @@
 # API Guide
 
-The MVP API is packet-first and models the first wedge: insurance claims document packets. It is intentionally in-memory so the workflow can be validated before choosing storage, OCR, queue, and model providers.
+The MVP API is packet-first and models the first wedge: insurance claims document packets. It is intentionally in-memory so the workflow can be validated before choosing storage, queue, and production model providers. OCR and extraction already sit behind provider contracts, with deterministic mock/rule-based providers used for local development.
 
 Run locally:
 

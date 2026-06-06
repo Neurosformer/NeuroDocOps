@@ -113,6 +113,7 @@ This repository includes the first backend foundation for the insurance claims p
 - FastAPI application in `neurodocops/api.py`
 - Packet-first domain models in `neurodocops/models.py`
 - Infrastructure-free workflow service in `neurodocops/service.py`
+- OCR and extraction provider contracts in `neurodocops/providers.py`
 - Claim packet intake, document classification, field extraction, checklist evaluation, review, export, and audit events
 - Tests for the service and API workflow
 - Product research, API notes, and architecture notes in `docs/`
@@ -132,7 +133,7 @@ Run tests:
 pytest
 ```
 
-The current service uses in-memory storage and fake OCR text by design. The goal is to validate product behavior, packet states, checklist logic, review tasks, audit events, and API contracts before committing to specific OCR, database, object storage, queue, and model providers.
+The current service uses in-memory storage plus deterministic mock OCR/rule-based extraction by design. The goal is to validate product behavior, packet states, checklist logic, review tasks, audit events, provider contracts, and API boundaries before committing to specific database, object storage, queue, and production OCR/model providers.
 
 ## Data Model Ideas
 
