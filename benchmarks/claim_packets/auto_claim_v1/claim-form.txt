@@ -1,0 +1,7 @@
+Claim form
+Claim number CLM-AUTO-0001
+Policy number POL-AUTO-42
+Claimant Amina Rahman
+Loss date 2026-04-18
+Loss type auto collision
+Reported by claims intake on 2026-04-19.

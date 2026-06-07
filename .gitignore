@@ -8,8 +8,8 @@ venv/
 dist/
 build/
 node_modules/
-frontend/dist/
-frontend/node_modules/
+services/web/dist/
+services/web/node_modules/
 *.egg-info/
 .env
 .env.*

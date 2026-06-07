@@ -106,14 +106,24 @@ Potential technical components:
 - Storage: object storage for files, relational database for metadata and extracted fields
 - Security: tenant isolation, encryption, role-based access, audit logs
 
+Provider strategy: NeuroDocOps should be pluggable and tiered. The proof-of-concept should default to free/local providers, then allow better paid services as quality, compliance, or customer requirements increase. OCR, LLM reasoning, storage, database, queueing, auth, intake, search, document rendering, monitoring, secrets, billing, and hosting should all sit behind provider interfaces. See `docs/pluggable-provider-development-plan.md`, `docs/pluggable-provider-test-plan.md`, and `docs/ocr-provider-strategy.md`.
+
 ## Current Implementation
 
-This repository includes the first backend foundation for the insurance claims packet workflow:
+This repository includes the first service-oriented foundation for the insurance claims packet workflow:
 
-- FastAPI application in `neurodocops/api.py`
-- Packet-first domain models in `neurodocops/models.py`
-- Infrastructure-free workflow service in `neurodocops/service.py`
-- OCR and extraction provider contracts in `neurodocops/providers.py`
+- FastAPI API service in `services/api/neurodocops_api/main.py`
+- Worker service shell in `services/worker/neurodocops_worker/main.py`
+- Reviewer console in `services/web/`
+- Packet-first domain models in `packages/domain/neurodocops_domain/`
+- Repository-backed workflow service in `packages/workflow/neurodocops_workflow/`
+- OCR and extraction provider contracts in `packages/providers/neurodocops_providers/`
+- Storage repository contracts plus in-memory and Postgres implementations in `packages/storage/neurodocops_storage/`
+- Object storage contracts plus in-memory and MinIO implementations in `packages/storage/neurodocops_storage/`
+- Job queue contracts plus in-memory and Redis implementations in `packages/jobs/neurodocops_jobs/`
+- Header-driven development RBAC primitives in `packages/security/neurodocops_security/`
+- Compatibility imports under `neurodocops/` for existing clients and tests
+- Local service infrastructure in `infra/docker-compose.yml`
 - Claim packet intake, document classification, field extraction, checklist evaluation, review, export, and audit events
 - Tests for the service and API workflow
 - Product research, API notes, and architecture notes in `docs/`
@@ -124,7 +134,31 @@ Run locally:
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-uvicorn neurodocops.api:app --reload
+uvicorn services.api.neurodocops_api.main:app --reload
+```
+
+Run the web service locally:
+
+```bash
+cd services/web
+npm install
+npm run dev
+```
+
+Run the service stack locally:
+
+```bash
+python scripts/server_switch.py on
+python scripts/server_switch.py status
+python scripts/server_switch.py logs
+python scripts/server_switch.py off
+```
+
+Useful local stack options:
+
+```bash
+python scripts/server_switch.py on --no-build
+python scripts/server_switch.py on --skip-smoke
 ```
 
 Run tests:
@@ -133,7 +167,36 @@ Run tests:
 pytest
 ```
 
-The current service uses in-memory storage plus deterministic mock OCR/rule-based extraction by design. The goal is to validate product behavior, packet states, checklist logic, review tasks, audit events, provider contracts, and API boundaries before committing to specific database, object storage, queue, and production OCR/model providers.
+Local one-process runs still default to an in-memory `PacketRepository`, in-memory object store, in-memory job queue, and deterministic mock OCR/rule-based extraction by design. Set `NEURODOCOPS_STORAGE_BACKEND=postgres` and `DATABASE_URL` to use the durable JSONB-backed Postgres repository. Set `NEURODOCOPS_JOB_QUEUE_BACKEND=redis` and `REDIS_URL` to enqueue packet processing jobs for the worker. Set `NEURODOCOPS_OBJECT_STORAGE_BACKEND=minio` plus the `OBJECT_STORAGE_*` variables to store uploaded source documents in MinIO. Paid OCR/model providers should remain disabled unless explicitly enabled with provider-specific environment variables and live-provider flags. The `/ready` endpoint reports safe provider metadata without exposing credentials, database URLs, Redis URLs, object keys, or storage secrets. The project now has separate deployable API, worker, web, Postgres, Redis, and MinIO service boundaries so persistence, object storage, queue processing, and real OCR can be added without collapsing everything back into one toy process.
+
+## Development RBAC
+
+The current API includes a minimal header-driven RBAC layer for local development and tests. Send `X-Actor` and `X-Role` with API requests:
+
+```bash
+curl http://localhost:8000/claim-packets \
+  -H 'X-Actor: reviewer@example.com' \
+  -H 'X-Role: reviewer'
+```
+
+Supported roles are `admin`, `manager`, `reviewer`, `auditor`, and `integration`. Missing headers currently default to `dev-admin` with role `admin` for local compatibility. Real auth, tenant isolation, SSO, and production identity enforcement remain future work.
+
+## Agent Team
+
+Project-local OpenCode agents live under `.opencode/agent/` and coordinate work like a small DevOps/product team:
+
+- `neurodocops-devops-lead`: cross-service coordination and integration.
+- `neurodocops-api-rbac-engineer`: API, workflow, provider metadata, RBAC, and backend tests.
+- `neurodocops-worker-infra-engineer`: worker, Redis, Postgres, MinIO, Docker Compose, and one-click stack scripts.
+- `vigolium-ui-ux-designer`: dark, high-trust, proof-oriented reviewer console direction.
+- `neurodocops-qa-release-engineer`: regression checks, build checks, and release validation.
+- `neurodocops-docs-product-engineer`: product, architecture, API, RBAC, provider, and local-ops documentation.
+
+Restart OpenCode after changing `.opencode` files so the running session loads the updated agent and skill definitions.
+
+## UI Direction
+
+The reviewer console in `services/web/` now follows a dark, evidence-first, audit-console direction inspired by the seriousness of Vigolium-style security review products. It must not copy Vigolium assets, logos, exact text, screenshots, or proprietary layout. The UI should surface evidence, citations, review exceptions, RBAC context, approval state, and export safety using only backend-supported behavior.
 
 ## Data Model Ideas
 

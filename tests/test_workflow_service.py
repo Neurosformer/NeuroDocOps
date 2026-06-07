@@ -1,7 +1,43 @@
 import pytest
 
-from neurodocops.models import ClaimDocumentCreate, ClaimPacketCreate, DocumentType, PacketStatus, ReviewDecision, ReviewRequest
+from neurodocops.models import (
+    Citation,
+    ClaimDocumentCreate,
+    ClaimDocumentRecord,
+    ClaimPacketCreate,
+    DocumentType,
+    ExtractedField,
+    OCRResult,
+    PacketStatus,
+    ReviewDecision,
+    ReviewRequest,
+)
 from neurodocops.service import ClaimPacketWorkflowService, WorkflowConflictError
+from packages.storage.neurodocops_storage import InMemoryPacketRepository
+
+
+class HighConfidenceExtractionProvider:
+    def classify_document(self, document: ClaimDocumentRecord, ocr: OCRResult) -> DocumentType:
+        filename = document.filename.lower()
+        if "claim" in filename:
+            return DocumentType.CLAIM_FORM
+        if "incident" in filename:
+            return DocumentType.INCIDENT_REPORT
+        if "invoice" in filename:
+            return DocumentType.REPAIR_INVOICE
+        if "identity" in filename:
+            return DocumentType.IDENTITY_DOCUMENT
+        return DocumentType.UNKNOWN
+
+    def extract_fields(self, document: ClaimDocumentRecord, ocr: OCRResult) -> list[ExtractedField]:
+        return [
+            ExtractedField(
+                name="verified_field",
+                value="verified",
+                confidence=0.99,
+                citation=Citation(document_id=document.id, page=1, snippet=ocr.text[:80] or document.filename),
+            )
+        ]
 
 
 def claim_packet_payload(include_identity: bool = True) -> ClaimPacketCreate:
@@ -107,6 +143,26 @@ def test_export_requires_approval() -> None:
         service.export_packet(packet.id)
 
 
+def test_export_requires_explicit_review_even_without_open_tasks() -> None:
+    service = ClaimPacketWorkflowService(extraction_provider=HighConfidenceExtractionProvider())
+    packet = service.intake_packet(claim_packet_payload())
+
+    evaluated = service.evaluate_checklist(packet.id)
+
+    assert evaluated.status == PacketStatus.NEEDS_REVIEW
+    assert not evaluated.review_tasks
+    with pytest.raises(WorkflowConflictError, match="approved"):
+        service.export_packet(packet.id)
+
+    reviewed = service.complete_review(
+        packet.id,
+        ReviewRequest(decision=ReviewDecision.APPROVE, reviewer="claims.ops@example.com"),
+    )
+
+    assert reviewed.status == PacketStatus.APPROVED
+    assert service.export_packet(packet.id).status == PacketStatus.EXPORTED
+
+
 def test_review_requires_checklist_evaluation() -> None:
     service = ClaimPacketWorkflowService()
     packet = service.intake_packet(claim_packet_payload())
@@ -146,3 +202,21 @@ def test_auto_loss_requires_repair_invoice() -> None:
     evaluated = service.evaluate_checklist(packet.id)
 
     assert any(item.required_document_type == DocumentType.REPAIR_INVOICE for item in evaluated.checklist if item.status.value == "fail")
+
+
+def test_workflow_service_uses_injected_packet_repository() -> None:
+    repository = InMemoryPacketRepository()
+    intake_service = ClaimPacketWorkflowService(repository=repository)
+    review_service = ClaimPacketWorkflowService(repository=repository)
+
+    packet = intake_service.intake_packet(claim_packet_payload())
+    evaluated = review_service.evaluate_checklist(packet.id)
+
+    assert evaluated.id == packet.id
+    assert review_service.get_packet(packet.id).status == PacketStatus.NEEDS_REVIEW
+    assert [event.action.value for event in review_service.list_audit_events(packet.id)] == [
+        "packet_intaked",
+        "documents_classified",
+        "fields_extracted",
+        "checklist_evaluated",
+    ]

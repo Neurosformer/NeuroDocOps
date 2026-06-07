@@ -1,0 +1,6 @@
+Repair invoice
+Vendor North Bridge Auto Body
+Invoice number INV-8801
+Grand total 1840.50 USD
+Amount due 1840.50 USD
+Work includes bumper replacement, paint labor, and sensor calibration.

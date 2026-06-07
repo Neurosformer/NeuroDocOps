@@ -1,0 +1,117 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: services/api/Dockerfile
+      network: host
+    environment:
+      NEURODOCOPS_ENV: development
+      NEURODOCOPS_STORAGE_BACKEND: postgres
+      NEURODOCOPS_JOB_QUEUE_BACKEND: redis
+      NEURODOCOPS_OBJECT_STORAGE_BACKEND: minio
+      NEURODOCOPS_OCR_PROVIDER: mock
+      NEURODOCOPS_EXTRACTION_PROVIDER: rule_based_insurance
+      NEURODOCOPS_PROVIDER_TIER: free
+      NEURODOCOPS_LIVE_OCR_ENABLED: "false"
+      NEURODOCOPS_MAX_LIVE_OCR_PAGES: "0"
+      NEURODOCOPS_OCR_CACHE_ENABLED: "true"
+      DATABASE_URL: postgresql://neurodocops:neurodocops@postgres:5432/neurodocops
+      REDIS_URL: redis://redis:6379/0
+      OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      OBJECT_STORAGE_BUCKET: neurodocops-source-documents
+      OBJECT_STORAGE_ACCESS_KEY: neurodocops
+      OBJECT_STORAGE_SECRET_KEY: neurodocops-dev-secret
+      OBJECT_STORAGE_REGION: us-east-1
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ..
+      dockerfile: services/worker/Dockerfile
+      network: host
+    environment:
+      NEURODOCOPS_ENV: development
+      NEURODOCOPS_STORAGE_BACKEND: postgres
+      NEURODOCOPS_JOB_QUEUE_BACKEND: redis
+      NEURODOCOPS_OBJECT_STORAGE_BACKEND: minio
+      NEURODOCOPS_OCR_PROVIDER: mock
+      NEURODOCOPS_EXTRACTION_PROVIDER: rule_based_insurance
+      NEURODOCOPS_PROVIDER_TIER: free
+      NEURODOCOPS_LIVE_OCR_ENABLED: "false"
+      NEURODOCOPS_MAX_LIVE_OCR_PAGES: "0"
+      NEURODOCOPS_OCR_CACHE_ENABLED: "true"
+      DATABASE_URL: postgresql://neurodocops:neurodocops@postgres:5432/neurodocops
+      REDIS_URL: redis://redis:6379/0
+      OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      OBJECT_STORAGE_BUCKET: neurodocops-source-documents
+      OBJECT_STORAGE_ACCESS_KEY: neurodocops
+      OBJECT_STORAGE_SECRET_KEY: neurodocops-dev-secret
+      OBJECT_STORAGE_REGION: us-east-1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ..
+      dockerfile: services/web/Dockerfile
+      network: host
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: neurodocops
+      POSTGRES_USER: neurodocops
+      POSTGRES_PASSWORD: neurodocops
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U neurodocops -d neurodocops"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: neurodocops
+      MINIO_ROOT_PASSWORD: neurodocops-dev-secret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres-data:
+  minio-data:

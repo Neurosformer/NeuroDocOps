@@ -1,0 +1,44 @@
+{
+  "name": "auto_claim_v1",
+  "documents": [
+    {
+      "filename": "claim-form.txt",
+      "text_path": "claim-form.txt",
+      "content_type": "text/plain",
+      "expected_document_type": "claim_form",
+      "expected_fields": [
+        { "name": "claim_number", "value": "CLM-AUTO-0001" },
+        { "name": "policy_number", "value": "POL-AUTO-42" },
+        { "name": "loss_date", "value": "2026-04-18" }
+      ]
+    },
+    {
+      "filename": "incident-report.txt",
+      "text_path": "incident-report.txt",
+      "content_type": "text/plain",
+      "expected_document_type": "incident_report",
+      "expected_fields": [
+        { "name": "loss_date", "value": "2026-04-18" },
+        { "name": "incident_date", "value": "2026-04-18" }
+      ]
+    },
+    {
+      "filename": "repair-invoice.txt",
+      "text_path": "repair-invoice.txt",
+      "content_type": "text/plain",
+      "expected_document_type": "repair_invoice",
+      "expected_fields": [
+        { "name": "invoice_amount", "value": "1840.50 USD" }
+      ]
+    },
+    {
+      "filename": "identity.txt",
+      "text_path": "identity.txt",
+      "content_type": "text/plain",
+      "expected_document_type": "identity_document",
+      "expected_fields": [
+        { "name": "identity_name", "value": "Amina Rahman" }
+      ]
+    }
+  ]
+}
