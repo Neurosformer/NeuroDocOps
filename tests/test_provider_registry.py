@@ -2,7 +2,9 @@ import json
 
 import pytest
 
+from packages.domain.neurodocops_domain.models import ClaimDocumentRecord
 from packages.providers.neurodocops_providers import (
+    LocalPDFTextOCRProvider,
     MockOCRProvider,
     ProviderConfigError,
     ProviderKind,
@@ -100,6 +102,40 @@ def test_registered_free_ocr_provider_fails_until_adapter_exists() -> None:
         registry.create_ocr_provider()
 
 
+def test_provider_registry_can_create_local_pdf_text_provider() -> None:
+    registry = ProviderRegistry(ProviderSettings(ocr_provider="local_pdf_text"))
+
+    provider = registry.create_ocr_provider()
+
+    assert isinstance(provider, LocalPDFTextOCRProvider)
+    assert provider.name == "local-pdf-text"
+
+
+def test_local_pdf_text_provider_extracts_embedded_pdf_text_without_secrets() -> None:
+    document = ClaimDocumentRecord(filename="claim-form.pdf", text="fallback wrong text", content_type="application/pdf")
+    provider = LocalPDFTextOCRProvider(source_bytes_loader=lambda _: embedded_text_pdf("Claim form with claim number CLM-PDF-1 and policy number POL-PDF."))
+
+    ocr = provider.parse_document(document)
+    serialized = json.dumps(ocr.metadata)
+
+    assert ocr.provider == "local-pdf-text"
+    assert "CLM-PDF-1" in ocr.text
+    assert "fallback wrong text" not in ocr.text
+    assert ocr.metadata["source"] == "uploaded_pdf_bytes"
+    assert "claim-packets/" not in serialized
+
+
+def test_local_pdf_text_provider_falls_back_to_payload_text_for_unreadable_pdf() -> None:
+    document = ClaimDocumentRecord(filename="scan.pdf", text="fallback claim number CLM-FALLBACK", content_type="application/pdf")
+    provider = LocalPDFTextOCRProvider(source_bytes_loader=lambda _: b"%PDF-1.4\nno embedded text")
+
+    ocr = provider.parse_document(document)
+
+    assert ocr.text == "fallback claim number CLM-FALLBACK"
+    assert ocr.metadata["source"] == "payload_text"
+    assert ocr.metadata["fallback_reason"] == "no_embedded_text"
+
+
 def test_invalid_provider_tier_fails_clearly() -> None:
     with pytest.raises(ProviderConfigError, match="Unsupported NEURODOCOPS_PROVIDER_TIER: gold"):
         load_provider_settings({"NEURODOCOPS_PROVIDER_TIER": "gold"})
@@ -144,8 +180,35 @@ def test_provider_metadata_reports_active_default_providers() -> None:
     assert metadata["active"]["extraction"]["adapter"] == "RuleBasedInsuranceExtractionProvider"
 
 
+def test_provider_metadata_reports_local_pdf_text_as_free_and_non_live() -> None:
+    metadata = ProviderRegistry(ProviderSettings(ocr_provider="local_pdf_text")).ready_metadata()
+    ocr = metadata["active"]["ocr"]
+
+    assert ocr["name"] == "local_pdf_text"
+    assert ocr["adapter"] == "LocalPDFTextOCRProvider"
+    assert ocr["paid"] is False
+    assert ocr["live_enabled"] is False
+    assert ocr["implemented"] is True
+
+
 def test_provider_scorecard_blank_is_not_default_approved() -> None:
     scorecard = blank_provider_scorecard("candidate", ProviderKind.OCR)
 
     assert scorecard.weighted_score() == 0.0
     assert scorecard.passes_default_gate() is False
+
+
+def embedded_text_pdf(text: str) -> bytes:
+    return f"""%PDF-1.4
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj
+4 0 obj << /Length 64 >>
+stream
+BT /F1 12 Tf 72 720 Td ({text}) Tj ET
+endstream
+endobj
+5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj
+trailer << /Root 1 0 R >>
+%%EOF
+""".encode("latin-1")

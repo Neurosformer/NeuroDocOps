@@ -43,35 +43,35 @@ const ROLES = {
     email: "admin@neurodocops.local",
     password: "Admin@123",
     summary: "Full system access, export approval, audit visibility, and operations control.",
-    permissions: ["packet:create", "packet:read", "document:upload", "packet:process", "review:complete", "export:packet", "audit:read", "job:read"],
+    permissions: ["packet:create", "packet:read", "document:upload", "packet:process", "review:complete", "review_task:read", "review_task:update", "export:packet", "audit:read", "job:read"],
   },
   manager: {
     label: "Manager",
     email: "manager@neurodocops.local",
     password: "Manager@123",
     summary: "Owns operational queue, approval flow, export release, and team throughput.",
-    permissions: ["packet:create", "packet:read", "document:upload", "packet:process", "review:complete", "export:packet", "audit:read", "job:read"],
+    permissions: ["packet:create", "packet:read", "document:upload", "packet:process", "review:complete", "review_task:read", "review_task:update", "export:packet", "audit:read", "job:read"],
   },
   reviewer: {
     label: "Reviewer",
     email: "reviewer@neurodocops.local",
     password: "Reviewer@123",
     summary: "Processes evidence, resolves review exceptions, and approves packets without export release.",
-    permissions: ["packet:create", "packet:read", "document:upload", "packet:process", "review:complete", "audit:read", "job:read"],
+    permissions: ["packet:create", "packet:read", "document:upload", "packet:process", "review:complete", "review_task:read", "review_task:update", "audit:read", "job:read"],
   },
   auditor: {
     label: "Auditor",
     email: "auditor@neurodocops.local",
     password: "Auditor@123",
     summary: "Read-only evidence, decisions, audit trail, and job status visibility.",
-    permissions: ["packet:read", "audit:read", "job:read"],
+    permissions: ["packet:read", "review_task:read", "audit:read", "job:read"],
   },
   integration: {
     label: "Integration",
     email: "integration@neurodocops.local",
     password: "Integration@123",
     summary: "Service-account style intake, processing, export, and job polling.",
-    permissions: ["packet:create", "packet:read", "packet:process", "export:packet", "job:read"],
+    permissions: ["packet:create", "packet:read", "document:upload", "packet:process", "export:packet", "job:read"],
   },
 };
 
@@ -116,10 +116,34 @@ async function api(path, options = {}) {
   const contentType = response.headers.get("content-type") || "";
   const body = contentType.includes("application/json") ? await response.json() : await response.text();
   if (!response.ok) {
-    const detail = typeof body === "object" && body !== null ? body.detail : body;
-    throw new Error(detail || `Request failed: ${response.status}`);
+    throw new Error(formatApiError(body, response.status));
   }
   return body;
+}
+
+function formatApiError(body, status) {
+  if (!body) return `Request failed: ${status}`;
+  if (typeof body === "string") {
+    try { return formatApiError(JSON.parse(body), status); } catch { return body; }
+  }
+  if (Array.isArray(body)) return body.map((item) => formatApiErrorItem(item)).join("; ");
+  if (typeof body === "object") {
+    if (body.detail) return formatApiError(body.detail, status);
+    if (body.message) return String(body.message);
+    if (body.msg) return String(body.msg);
+    return JSON.stringify(body);
+  }
+  return String(body);
+}
+
+function formatApiErrorItem(item) {
+  if (typeof item === "string") return item;
+  if (item && typeof item === "object") {
+    const location = Array.isArray(item.loc) ? item.loc.filter((part) => part !== "body").join(".") : null;
+    const message = item.msg || item.message || "Invalid value";
+    return location ? `${location}: ${message}` : message;
+  }
+  return String(item);
 }
 
 function authHeaders(session) {
@@ -128,6 +152,17 @@ function authHeaders(session) {
 
 function can(session, permission) {
   return Boolean(session && ROLES[session.role]?.permissions.includes(permission));
+}
+
+function toLocalDateTimeValue(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+
+function fromLocalDateTimeValue(value) {
+  return value ? new Date(value).toISOString() : null;
 }
 
 function useAsyncData(loader, deps) {
@@ -192,15 +227,17 @@ function App() {
 
   if (!session) return <SignInPage onSignIn={signIn} theme={theme} onCycleTheme={cycleTheme} />;
 
-  const packetMatch = route.match(/^\/packets\/([^/]+)$/);
+  const packetMatch = route === "/packets/new" ? null : route.match(/^\/packets\/([^/]+)$/);
   return (
     <div className="app-shell">
       <Nav route={route} navigate={navigate} session={session} onSignOut={signOut} theme={theme} onCycleTheme={cycleTheme} />
       <main className="content">
         {route === "/" && <Dashboard navigate={navigate} session={session} />}
+        {route === "/review" && <ReviewQueuePage navigate={navigate} session={session} />}
         {route === "/system" && <SystemPage session={session} />}
+        {route === "/plugins" && <PluginConfigPage session={session} />}
         {route === "/packets" && <PacketsPage navigate={navigate} session={session} />}
-        {route === "/packets/new" && <NewPacketPage navigate={navigate} session={session} />}
+        {route === "/packets/new" && <SourceUploadPacketPage navigate={navigate} session={session} />}
         {packetMatch && <PacketDetail packetId={packetMatch[1]} navigate={navigate} session={session} />}
       </main>
     </div>
@@ -283,7 +320,9 @@ function Nav({ route, navigate, session, onSignOut, theme, onCycleTheme }) {
   }, []);
   const links = [
     ["/", "Dashboard"],
+    ...(can(session, "review_task:read") ? [["/review", "Review Queue"]] : []),
     ["/system", "System"],
+    ...(session.role === "admin" ? [["/plugins", "Plugins"]] : []),
     ["/packets", "Claims"],
     ...(can(session, "packet:create") ? [["/packets/new", "New Packet"]] : []),
   ];
@@ -352,6 +391,88 @@ function Dashboard({ navigate, session }) {
   );
 }
 
+function ReviewQueuePage({ navigate, session }) {
+  const [assignee, setAssignee] = useState(session.email);
+  const [statusFilter, setStatusFilter] = useState("open");
+  const [priority, setPriority] = useState("");
+  const [unassigned, setUnassigned] = useState(false);
+  const [savingTaskId, setSavingTaskId] = useState(null);
+  const [error, setError] = useState(null);
+  const query = new URLSearchParams();
+  if (assignee && !unassigned) query.set("assignee", assignee);
+  if (statusFilter !== "all") query.set("status", statusFilter);
+  if (priority) query.set("priority", priority);
+  if (unassigned) query.set("unassigned", "true");
+  const { data: items, loading, error: loadError, reload } = useAsyncData(
+    () => api(`/review-tasks${query.toString() ? `?${query.toString()}` : ""}`, { headers: authHeaders(session) }),
+    [session.email, session.role, assignee, statusFilter, priority, unassigned]
+  );
+
+  const updateTask = async (item, updates) => {
+    setSavingTaskId(item.task.id);
+    setError(null);
+    try {
+      await api(`/claim-packets/${item.packet_id}/review-tasks/${item.task.id}`, {
+        method: "PATCH",
+        headers: authHeaders(session),
+        body: JSON.stringify(updates),
+      });
+      await reload();
+    } catch (apiError) {
+      setError(apiError.message);
+    } finally {
+      setSavingTaskId(null);
+    }
+  };
+
+  const rows = items || [];
+  return (
+    <section>
+      <PageHeader eyebrow="Human review" title="Reviewer Work Queue" description="Live queue backed by review-task assignment metadata, priority, due dates, and RBAC. SLA escalation and saved views remain roadmap." action={<button className="ghost" onClick={reload}><RefreshCw size={14} /> Refresh</button>} />
+      <ErrorBanner error={loadError || error} title="Review queue blocked" />
+      <section className="panel queue-controls">
+        <label><span>Assignee</span><input value={assignee} onChange={(event) => setAssignee(event.target.value)} disabled={unassigned} placeholder="reviewer@example.com" /></label>
+        <label><span>Status</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="open">Open</option><option value="resolved">Resolved</option><option value="all">All</option></select></label>
+        <label><span>Priority</span><select value={priority} onChange={(event) => setPriority(event.target.value)}><option value="">All</option><option value="urgent">Urgent</option><option value="high">High</option><option value="normal">Normal</option><option value="low">Low</option></select></label>
+        <label className="checkline"><input type="checkbox" checked={unassigned} onChange={(event) => setUnassigned(event.target.checked)} /> Unassigned only</label>
+      </section>
+      <section className="panel">
+        <div className="panel-title"><h2>Queue Items</h2><span className="provider-flag">{loading ? "Loading" : `${rows.length} tasks`}</span></div>
+        {loading ? <Loading /> : rows.length === 0 ? <p className="muted">No review tasks match this queue filter.</p> : <div className="review-queue-list">{rows.map((item) => <ReviewQueueItem key={`${item.packet_id}-${item.task.id}`} item={item} session={session} navigate={navigate} saving={savingTaskId === item.task.id} onUpdate={updateTask} />)}</div>}
+      </section>
+    </section>
+  );
+}
+
+function ReviewQueueItem({ item, session, navigate, saving, onUpdate }) {
+  const task = item.task;
+  const [assignee, setAssignee] = useState(task.assignee || session.email);
+  const [priority, setPriority] = useState(task.priority || "normal");
+  const [dueAt, setDueAt] = useState(toLocalDateTimeValue(task.due_at));
+  const [notes, setNotes] = useState(task.notes || "");
+  useEffect(() => {
+    setAssignee(task.assignee || session.email);
+    setPriority(task.priority || "normal");
+    setDueAt(toLocalDateTimeValue(task.due_at));
+    setNotes(task.notes || "");
+  }, [task.id, task.assignee, task.priority, task.due_at, task.notes, session.email]);
+  const canUpdate = can(session, "review_task:update");
+  const submit = () => onUpdate(item, { assignee: assignee || null, priority, due_at: fromLocalDateTimeValue(dueAt), notes: notes || null });
+  return (
+    <article className={`review-queue-item priority-${task.priority || "normal"}`}>
+      <div className="review-queue-main">
+        <div><StatusBadge status={task.status} /> <strong>{item.claim_reference}</strong> <span className="muted">{item.claimant_name}</span></div>
+        <p>{task.reason}</p>
+        <div className="review-task-meta"><span>Packet: {statusLabel(item.packet_status)}</span><span>Loss: {item.loss_type}</span><span>Assignee: {task.assignee || "Unassigned"}</span><span>Priority: {task.priority}</span>{task.due_at && <span>Due {new Date(task.due_at).toLocaleString()}</span>}</div>
+      </div>
+      <div className="review-queue-actions">
+        <button className="ghost" onClick={() => navigate(`/packets/${item.packet_id}`)}><ArrowRight size={14} /> Open Packet</button>
+        {canUpdate ? <div className="queue-edit-grid"><input value={assignee} onChange={(event) => setAssignee(event.target.value)} placeholder="assignee@example.com" /><select value={priority} onChange={(event) => setPriority(event.target.value)}><option value="urgent">Urgent</option><option value="high">High</option><option value="normal">Normal</option><option value="low">Low</option></select><input type="datetime-local" value={dueAt} onChange={(event) => setDueAt(event.target.value)} /><input value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Queue note" /><button className="primary" onClick={submit} disabled={saving}>{saving ? <Loader2 className="spin" size={14} /> : <CheckCircle2 size={14} />} Save Queue Metadata</button></div> : <span className="review-rbac-note">Read-only queue access. Requires review_task:update.</span>}
+      </div>
+    </article>
+  );
+}
+
 function SystemPage({ session }) {
   const { data: readiness, loading, error, reload } = useAsyncData(() => api("/ready"), []);
   return (
@@ -359,6 +480,57 @@ function SystemPage({ session }) {
       <PageHeader eyebrow="Control plane" title="Live System Status" description={`Standalone infrastructure readiness for ${session.name}. This page reads the live /ready endpoint and provider registry.`} />
       <SystemStatus readiness={readiness} loading={loading} error={error} reload={reload} standalone />
     </section>
+  );
+}
+
+function PluginConfigPage({ session }) {
+  const { data: config, loading, error, reload } = useAsyncData(() => api("/system/provider-configuration", { headers: authHeaders(session) }), [session.email, session.role]);
+  if (session.role !== "admin") return <Forbidden navigate={() => { window.location.hash = "/"; }} title="Plugin configuration is admin-only" message="Provider configuration controls are restricted to system administrators." />;
+  return (
+    <section>
+      <PageHeader eyebrow="Admin" title="Plugin Configuration" description="Read-only provider/plugin configuration from the live API. Provider changes are made through deployment environment variables, not unsafe browser-side secret forms." action={<button className="ghost" onClick={reload}><RefreshCw size={14} /> Refresh</button>} />
+      <ErrorBanner error={error} />
+      <section className="panel plugin-safety">
+        <div className="panel-title"><h2><ShieldCheck size={16} /> Configuration Safety Contract</h2></div>
+        <div className="system-summary">
+          <div><span className="summary-icon"><CheckCircle2 size={16} /></span><span>Mode</span><strong>{loading ? "..." : statusLabel(config?.mode || "unknown")}</strong></div>
+          <div><span className="summary-icon"><ShieldCheck size={16} /></span><span>Runtime Mutation</span><strong>{config?.safety?.runtime_mutation_supported ? "enabled" : "disabled"}</strong></div>
+          <div><span className="summary-icon"><Eye size={16} /></span><span>Secrets Exposed</span><strong>{config?.safety?.secrets_exposed ? "yes" : "no"}</strong></div>
+          <div><span className="summary-icon"><AlertTriangle size={16} /></span><span>Paid Live Opt-In</span><strong>{config?.safety?.paid_live_providers_require_explicit_opt_in ? "required" : "unknown"}</strong></div>
+        </div>
+      </section>
+      <section className="plugin-grid">
+        {loading && <div className="panel"><p className="muted">Loading provider slots from API.</p></div>}
+        {(config?.slots || []).map((slot) => <PluginSlot key={slot.kind} slot={slot} />)}
+      </section>
+    </section>
+  );
+}
+
+function PluginSlot({ slot }) {
+  const active = slot.active || {};
+  return (
+    <article className="panel plugin-card">
+      <div className="plugin-card-head">
+        <span className="provider-icon"><ProviderIcon provider={{ kind: slot.kind }} /></span>
+        <div><h2>{slot.label}</h2><code>{slot.env_var}</code></div>
+      </div>
+      <div className="plugin-current">
+        <span>Active</span>
+        <strong>{active.name || "unknown"}</strong>
+        <StatusBadge status={active.implemented ? "ready" : "open"} />
+      </div>
+      <div className="plugin-meta">
+        <span>Safe default</span><code>{slot.safe_default}</code>
+        <span>Adapter</span><code>{active.adapter || "not wired"}</code>
+        <span>Mode</span><code>{active.live_enabled ? "live" : "local"}</code>
+        <span>Tier</span><code>{active.tier || "unknown"}</code>
+      </div>
+      <div className="provider-values">
+        <strong>Known values</strong>
+        <div>{(slot.known_values || []).map((value) => <span key={value} className={(slot.paid_values || []).includes(value) ? "provider-flag warn" : "provider-flag"}>{value}</span>)}</div>
+      </div>
+    </article>
   );
 }
 
@@ -442,6 +614,101 @@ function PacketsPage({ navigate, session }) {
   return <section><PageHeader eyebrow="Queue" title="Evidence Packets" description="Role-filtered operations queue for intake, review, audit, and export readiness." action={can(session, "packet:create") && <button className="primary" onClick={() => navigate("/packets/new")}><Plus size={16} /> Create Packet</button>} /><ErrorBanner error={error} /><div className="toolbar"><div className="searchbox"><Search size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search claim, claimant, or loss type" /></div><button className="ghost" onClick={reload}><RefreshCw size={14} /> Refresh</button></div><section className="panel"><PacketTable packets={filtered} navigate={navigate} loading={loading} /></section></section>;
 }
 
+function SourceUploadPacketPage({ navigate, session }) {
+  const [claimReference, setClaimReference] = useState("CLM-1001");
+  const [claimantName, setClaimantName] = useState("Amina Rahman");
+  const [lossType, setLossType] = useState("auto");
+  const [documents, setDocuments] = useState([{ filename: "", text: "", file: null }]);
+  const [error, setError] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+  if (!can(session, "packet:create")) return <Forbidden navigate={navigate} title="Packet intake is not available" message="Your role can inspect evidence but cannot create new claim packets." />;
+  const updateDocument = (index, key, value) => setDocuments((current) => current.map((document, documentIndex) => documentIndex === index ? { ...document, [key]: value } : document));
+  const selectFile = (index, file) => setDocuments((current) => current.map((document, documentIndex) => documentIndex === index ? { ...document, file: file || null, filename: file?.name || document.filename } : document));
+  const addDocument = () => setDocuments((current) => [...current, { filename: "", text: "", file: null }]);
+  const removeDocument = (index) => setDocuments((current) => current.filter((_, documentIndex) => documentIndex !== index));
+  const packetPayload = { claim_reference: claimReference.trim(), claimant_name: claimantName.trim(), loss_type: lossType.trim() || "unknown", documents: [] };
+  const intakeDocuments = documents.map((document) => ({ ...document, filename: document.filename.trim(), text: document.text.trim() }));
+  const readiness = [
+    ["Claim reference", Boolean(packetPayload.claim_reference)],
+    ["Claimant name", Boolean(packetPayload.claimant_name)],
+    ["Loss type", Boolean(packetPayload.loss_type)],
+    ["At least one source file", intakeDocuments.length > 0],
+    ["Every document has a selected file", intakeDocuments.every((document) => Boolean(document.file))],
+    ["PDF parser path or fallback text", intakeDocuments.every((document) => document.file?.type === "application/pdf" || document.filename.toLowerCase().endsWith(".pdf") || Boolean(document.text))],
+  ];
+  const readinessComplete = readiness.every(([, ready]) => ready);
+  const validatePayload = () => {
+    if (!packetPayload.claim_reference) return "Claim reference is required before packet intake.";
+    if (!packetPayload.claimant_name) return "Claimant name is required before packet intake.";
+    if (!packetPayload.loss_type) return "Loss type is required before packet intake.";
+    if (!intakeDocuments.length) return "Add at least one source document file.";
+    const missingFileIndex = intakeDocuments.findIndex((document) => !document.file);
+    if (missingFileIndex >= 0) return `Document ${missingFileIndex + 1} source file is required.`;
+    const missingTextIndex = intakeDocuments.findIndex((document) => document.file?.type !== "application/pdf" && !document.filename.toLowerCase().endsWith(".pdf") && !document.text);
+    if (missingTextIndex >= 0) return `Document ${missingTextIndex + 1} needs fallback evidence text unless it is a digital PDF that can be parsed locally.`;
+    return null;
+  };
+  const createPacket = async (event) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setError(null);
+    const validationError = validatePayload();
+    if (validationError) {
+      setError(validationError);
+      setSubmitting(false);
+      return;
+    }
+    try {
+      const packet = await api("/claim-packets", { method: "POST", headers: authHeaders(session), body: JSON.stringify(packetPayload) });
+      for (const document of intakeDocuments) {
+        const formData = new FormData();
+        formData.append("file", document.file, document.filename || document.file.name);
+        if (document.text) formData.append("text", document.text);
+        formData.append("metadata", JSON.stringify({ intake: "web", original_filename: document.file.name }));
+        await api(`/claim-packets/${packet.id}/documents`, { method: "POST", headers: authHeaders(session), body: formData });
+      }
+      navigate(`/packets/${packet.id}`);
+    } catch (apiError) { setError(apiError.message); } finally { setSubmitting(false); }
+  };
+  return (
+    <section>
+      <button className="back" onClick={() => navigate("/packets")}><ArrowLeft size={16} /> Back to packets</button>
+      <PageHeader eyebrow="Intake" title="Create Evidence Packet" description="Create the packet record, upload source files, and use local PDF text extraction or fallback evidence text for processing. Review, approval, and export remain controlled follow-up actions." />
+      <ErrorBanner error={error} title="Packet intake blocked" />
+      <form className="intake-layout" onSubmit={createPacket}>
+        <section className="panel form">
+          <div className="panel-subtitle"><FileText size={16} /> Packet Identity</div>
+          <p className="muted">Use the carrier claim number, FNOL ID, or internal packet reference that operators will search later.</p>
+          <div className="form-grid">
+            <label>Claim Reference<input value={claimReference} onChange={(event) => setClaimReference(event.target.value)} required /></label>
+            <label>Claimant Name<input value={claimantName} onChange={(event) => setClaimantName(event.target.value)} required /></label>
+            <label>Loss Type<input value={lossType} onChange={(event) => setLossType(event.target.value)} required /></label>
+          </div>
+          <div className="panel-subtitle"><Upload size={16} /> Source Documents</div>
+          <p className="muted">Select the actual source file from the claimant, adjuster, provider, or integration feed. Digital PDFs with embedded text can be parsed locally without paid OCR. For scanned PDFs, images, non-PDF files, or parser misses, paste fallback evidence text so the workflow can classify, extract, check, review, and audit it.</p>
+          {documents.map((document, index) => <div className="document-editor" key={index}>
+            <div className="document-editor-head"><strong>Document {index + 1}</strong>{documents.length > 1 && <button type="button" className="ghost compact" onClick={() => removeDocument(index)}>Remove</button>}</div>
+            <label className="file-drop">Source File<input type="file" onChange={(event) => selectFile(index, event.target.files?.[0])} required={!document.file} /></label>
+            {document.file && <div className="selected-file"><FileText size={14} /><span>{document.file.name}</span><em>{Math.ceil(document.file.size / 1024)} KB</em></div>}
+            <input value={document.filename} onChange={(event) => updateDocument(index, "filename", event.target.value)} placeholder="Stored filename" required />
+            <textarea value={document.text} onChange={(event) => updateDocument(index, "text", event.target.value)} rows={5} placeholder="Optional fallback evidence text for scanned PDFs, images, non-PDF files, or parser misses" />
+          </div>)}
+          <div className="form-actions">
+            <button type="button" className="ghost" onClick={addDocument}><Plus size={14} /> Add Source File</button>
+            <button className="primary" disabled={submitting || !readinessComplete}>{submitting ? <Loader2 className="spin" size={14} /> : <Upload size={14} />} Create And Upload Packet</button>
+          </div>
+        </section>
+        <aside className="panel readiness-panel">
+          <div className="panel-subtitle"><ClipboardCheck size={16} /> Intake Readiness</div>
+          <p className="muted">This creates a packet, uploads each source file to object storage, then opens the packet detail screen. Processing uses local/free providers by default; paid OCR is not triggered from this screen.</p>
+          <div className="readiness-list">{readiness.map(([label, ready]) => <div className={ready ? "ready" : "missing"} key={label}>{ready ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}<span>{label}</span></div>)}</div>
+          <div className={`guardrail ${readinessComplete ? "good" : ""}`}><ShieldCheck size={16} /> {readinessComplete ? "Ready to create a source-backed packet with local/free parsing defaults." : "Complete missing intake fields before submitting."}</div>
+        </aside>
+      </form>
+    </section>
+  );
+}
+
 function NewPacketPage({ navigate, session }) {
   const [claimReference, setClaimReference] = useState("CLM-1001");
   const [claimantName, setClaimantName] = useState("Amina Rahman");
@@ -451,16 +718,49 @@ function NewPacketPage({ navigate, session }) {
   const [submitting, setSubmitting] = useState(false);
   if (!can(session, "packet:create")) return <Forbidden navigate={navigate} title="Packet intake is not available" message="Your role can inspect evidence but cannot create new claim packets." />;
   const updateDocument = (index, key, value) => setDocuments((current) => current.map((document, documentIndex) => documentIndex === index ? { ...document, [key]: value } : document));
+  const removeDocument = (index) => setDocuments((current) => current.filter((_, documentIndex) => documentIndex !== index));
+  const payload = {
+    claim_reference: claimReference.trim(),
+    claimant_name: claimantName.trim(),
+    loss_type: lossType.trim() || "unknown",
+    documents: documents.map((document) => ({ filename: document.filename.trim(), text: document.text.trim() })),
+  };
+  const readiness = [
+    ["Claim reference", Boolean(payload.claim_reference)],
+    ["Claimant name", Boolean(payload.claimant_name)],
+    ["Loss type", Boolean(payload.loss_type)],
+    ["At least one document", payload.documents.length > 0],
+    ["Every document has a filename", payload.documents.every((document) => Boolean(document.filename))],
+    ["Every document has evidence text", payload.documents.every((document) => Boolean(document.text))],
+  ];
+  const readinessComplete = readiness.every(([, ready]) => ready);
+  const validatePayload = () => {
+    if (!payload.claim_reference) return "Claim reference is required before packet intake.";
+    if (!payload.claimant_name) return "Claimant name is required before packet intake.";
+    if (!payload.loss_type) return "Loss type is required before packet intake.";
+    if (!payload.documents.length) return "Add at least one source document text payload.";
+    const missingFilenameIndex = payload.documents.findIndex((document) => !document.filename);
+    if (missingFilenameIndex >= 0) return `Document ${missingFilenameIndex + 1} filename is required.`;
+    const missingTextIndex = payload.documents.findIndex((document) => !document.text);
+    if (missingTextIndex >= 0) return `Document ${missingTextIndex + 1} evidence text is required.`;
+    return null;
+  };
   const createPacket = async (event) => {
     event.preventDefault();
     setSubmitting(true);
     setError(null);
+    const validationError = validatePayload();
+    if (validationError) {
+      setError(validationError);
+      setSubmitting(false);
+      return;
+    }
     try {
-      const packet = await api("/claim-packets", { method: "POST", headers: authHeaders(session), body: JSON.stringify({ claim_reference: claimReference, claimant_name: claimantName, loss_type: lossType, documents }) });
+      const packet = await api("/claim-packets", { method: "POST", headers: authHeaders(session), body: JSON.stringify(payload) });
       navigate(`/packets/${packet.id}`);
     } catch (apiError) { setError(apiError.message); } finally { setSubmitting(false); }
   };
-  return <section><button className="back" onClick={() => navigate("/packets")}><ArrowLeft size={16} /> Back to packets</button><PageHeader eyebrow="Intake" title="Create Evidence Packet" description="Text-payload intake backed by the live API. Multipart source upload remains backend-only for now." /><ErrorBanner error={error} /><form className="panel form" onSubmit={createPacket}><div className="form-grid"><label>Claim Reference<input value={claimReference} onChange={(event) => setClaimReference(event.target.value)} required /></label><label>Claimant Name<input value={claimantName} onChange={(event) => setClaimantName(event.target.value)} required /></label><label>Loss Type<input value={lossType} onChange={(event) => setLossType(event.target.value)} required /></label></div><div className="panel-subtitle"><Upload size={16} /> Document Text Payloads</div>{documents.map((document, index) => <div className="document-editor" key={index}><input value={document.filename} onChange={(event) => updateDocument(index, "filename", event.target.value)} placeholder="filename.pdf" required /><textarea value={document.text} onChange={(event) => updateDocument(index, "text", event.target.value)} rows={3} required /></div>)}<div className="form-actions"><button type="button" className="ghost" onClick={() => setDocuments([...documents, { filename: "document.pdf", text: "" }])}><Plus size={14} /> Add Document</button><button type="submit" className="primary" disabled={submitting}>{submitting ? <Loader2 className="spin" size={16} /> : <Plus size={16} />} Create Packet</button></div></form></section>;
+  return <section><button className="back" onClick={() => navigate("/packets")}><ArrowLeft size={16} /> Back to packets</button><PageHeader eyebrow="Intake" title="Create Evidence Packet" description="Create the packet record and source text payloads used by the live API. Processing, review, approval, and export remain controlled follow-up actions." /><ErrorBanner error={error} title="Packet intake blocked" /><form className="intake-layout" onSubmit={createPacket}><section className="panel form"><div className="panel-subtitle"><FileText size={16} /> Packet Identity</div><p className="muted">Use the carrier claim number, FNOL ID, or internal packet reference that operators will search later.</p><div className="form-grid"><label>Claim Reference<input value={claimReference} onChange={(event) => setClaimReference(event.target.value)} required /></label><label>Claimant Name<input value={claimantName} onChange={(event) => setClaimantName(event.target.value)} required /></label><label>Loss Type<input value={lossType} onChange={(event) => setLossType(event.target.value)} required /></label></div><div className="panel-subtitle"><Upload size={16} /> Evidence Text Payloads</div><p className="muted">Paste OCR or extracted document text. The API stores this text for classification, extraction, checklist review, and audit events. Source-file upload exists as a separate API endpoint after packet creation.</p>{documents.map((document, index) => <div className="document-editor" key={index}><div className="document-editor-head"><strong>Document {index + 1}</strong>{documents.length > 1 && <button type="button" className="ghost compact" onClick={() => removeDocument(index)}>Remove</button>}</div><input value={document.filename} onChange={(event) => updateDocument(index, "filename", event.target.value)} placeholder="filename.pdf" required /><textarea value={document.text} onChange={(event) => updateDocument(index, "text", event.target.value)} rows={4} placeholder="Paste OCR or extracted evidence text" required /></div>)}<div className="form-actions"><button type="button" className="ghost" onClick={() => setDocuments([...documents, { filename: "document.pdf", text: "" }])}><Plus size={14} /> Add Document</button><button type="submit" className="primary" disabled={submitting}>{submitting ? <Loader2 className="spin" size={16} /> : <Plus size={16} />} Create Evidence Packet</button></div></section><aside className="panel readiness-panel"><div className="panel-subtitle"><ShieldCheck size={16} /> Intake Readiness</div><p className="muted">Creates packet only. Run processing from the packet workspace after intake.</p><div className="readiness-list">{readiness.map(([label, ready]) => <div className={ready ? "ready" : "missing"} key={label}>{ready ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}<span>{label}</span></div>)}</div><div className={readinessComplete ? "guardrail good" : "guardrail"}><ShieldCheck size={16} /> {readinessComplete ? "Ready to create packet." : "Complete required intake fields before creating the packet."}</div></aside></form></section>;
 }
 
 function PacketDetail({ packetId, navigate, session }) {
@@ -509,15 +809,16 @@ function PacketDetail({ packetId, navigate, session }) {
         <button disabled={!can(session, "packet:process")} onClick={() => runAction("extract", "packet:process", () => api(`/claim-packets/${packetId}/extract`, { method: "POST", headers: requestHeaders }))}>Extract</button>
         <button disabled={!can(session, "packet:process")} onClick={() => runAction("checklist", "packet:process", () => api(`/claim-packets/${packetId}/checklist`, { method: "POST", headers: requestHeaders }))}>Checklist</button>
         <button disabled={!can(session, "review:complete")} onClick={() => runAction("review", "review:complete", () => api(`/claim-packets/${packetId}/review`, { method: "POST", headers: requestHeaders, body: JSON.stringify({ decision: "request_changes", reviewer: session.email, notes: "Needs more evidence." }) }))}>Request Changes</button>
-        <button disabled={!can(session, "review:complete")} onClick={() => runAction("review", "review:complete", () => api(`/claim-packets/${packetId}/review`, { method: "POST", headers: requestHeaders, body: JSON.stringify({ decision: "approve", reviewer: session.email, notes: "Validated for export." }) }))}>Approve</button>
+        <button disabled={!can(session, "review:complete") || openTasks.length > 0} onClick={() => runAction("review", "review:complete", () => api(`/claim-packets/${packetId}/review`, { method: "POST", headers: requestHeaders, body: JSON.stringify({ decision: "approve", reviewer: session.email, notes: "Validated for export." }) }))}>Approve</button>
         <button className="primary" disabled={!canExportPacket} onClick={() => runAction("export", "export:packet", () => api(`/claim-packets/${packetId}/export`, { method: "POST", headers: requestHeaders }))}>Export</button>
       </div>
       {jobStatus && <div className="guardrail"><RefreshCw size={16} /> Last worker job status: {statusLabel(jobStatus)}</div>}
+      {openTasks.length > 0 && <div className="guardrail"><ShieldCheck size={16} /> Resolve each review exception before approval or export.</div>}
       {!canExportPacket && <div className="guardrail"><ShieldCheck size={16} /> Export requires approved status, no open review tasks, and an export-capable role.</div>}
       <div className="detail-grid">
         <section className="panel wide"><h2>Evidence Documents & Fields</h2><Documents packetId={packetId} documents={packet.documents} session={session} onChanged={async () => { await reload(); await reloadAudit(); }} /></section>
         <section className="panel"><h2>Evidence Checklist</h2><Checklist items={packet.checklist} /></section>
-        <section className="panel"><h2>Review Exceptions</h2><ReviewTasks tasks={packet.review_tasks} /></section>
+        <section className="panel"><h2>Review Exceptions</h2><ReviewTasks packetId={packetId} tasks={packet.review_tasks} session={session} onChanged={async () => { await reload(); await reloadAudit(); }} /></section>
         <section className="panel"><h2><History size={16} /> Decision Timeline</h2><Audit events={audit || []} /></section>
       </div>
       {exportPayload && <section className="panel"><h2>Approved Export Payload</h2><pre>{JSON.stringify(exportPayload, null, 2)}</pre></section>}
@@ -567,9 +868,30 @@ function Checklist({ items }) {
   return <div className="list-stack">{items.map((item) => <div className="list-item" key={item.name}><StatusBadge status={item.status} /><strong>{item.name}</strong><span>{item.detail}</span></div>)}</div>;
 }
 
-function ReviewTasks({ tasks }) {
+function ReviewTasks({ packetId, tasks, session, onChanged }) {
+  const [notesByTask, setNotesByTask] = useState({});
+  const [savingTaskId, setSavingTaskId] = useState(null);
+  const [error, setError] = useState(null);
+  const canResolve = can(session, "review:complete");
+  const updateTask = async (task, action) => {
+    setSavingTaskId(task.id);
+    setError(null);
+    try {
+      await api(`/claim-packets/${packetId}/review-tasks/${task.id}/${action}`, {
+        method: "POST",
+        headers: authHeaders(session),
+        body: JSON.stringify({ notes: notesByTask[task.id] || null }),
+      });
+      setNotesByTask((current) => ({ ...current, [task.id]: "" }));
+      await onChanged();
+    } catch (apiError) { setError(apiError.message); } finally { setSavingTaskId(null); }
+  };
   if (!tasks.length) return <p className="muted">No review tasks yet.</p>;
-  return <div className="list-stack">{tasks.map((task) => <div className="list-item" key={task.id}><StatusBadge status={task.status} /><strong>{task.reason}</strong><span>{task.reviewer || "Unassigned"}{task.notes ? ` · ${task.notes}` : ""}</span></div>)}</div>;
+  return <div className="list-stack"><ErrorBanner error={error} />{tasks.map((task) => {
+    const isResolved = task.status === "resolved";
+    const action = isResolved ? "reopen" : "resolve";
+    return <div className={`list-item review-task ${isResolved ? "resolved" : "open"}`} key={task.id}><div className="review-task-head"><StatusBadge status={task.status} /><strong>{task.reason}</strong></div><div className="review-task-meta"><span>{task.reviewer || "Unassigned"}</span>{task.resolved_at && <span>Resolved {new Date(task.resolved_at).toLocaleString()}</span>}{task.notes && <span>{task.notes}</span>}</div>{canResolve ? <div className="review-task-actions"><input value={notesByTask[task.id] || ""} onChange={(event) => setNotesByTask((current) => ({ ...current, [task.id]: event.target.value }))} placeholder={isResolved ? "Reason for reopening" : "Resolution note for audit trail"} /><button className={isResolved ? "reopen" : ""} onClick={() => updateTask(task, action)} disabled={savingTaskId === task.id}>{savingTaskId === task.id ? <Loader2 className="spin" size={14} /> : <CheckCircle2 size={14} />}{isResolved ? "Reopen Task" : "Resolve Task"}</button></div> : <span className="review-rbac-note">Review action locked by RBAC. Requires review:complete.</span>}</div>;
+  })}</div>;
 }
 
 function Audit({ events }) {
@@ -591,9 +913,9 @@ function Metric({ label, value, icon: Icon, tone = "neutral" }) {
   return <div className={`metric metric-${tone}`}><span className="icon-cell"><Icon size={20} /></span><span>{label}</span><strong>{value}</strong></div>;
 }
 
-function ErrorBanner({ error }) {
+function ErrorBanner({ error, title = "Action blocked" }) {
   if (!error) return null;
-  return <div className="error"><AlertTriangle size={16} /> {error}</div>;
+  return <div className="error" role="alert"><AlertTriangle size={16} /><div><strong>{title}</strong><span>{String(error)}</span></div></div>;
 }
 
 function Loading() {

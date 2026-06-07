@@ -31,7 +31,7 @@ The first surface should not include broad analytics, autonomous claim decisions
 | User Type | Current RBAC Role | Real-World Person Or System | Primary Tasks | Should Not Do |
 | --- | --- | --- | --- | --- |
 | System owner | `admin` | Internal product/operator admin | Configure environment, provider mode, users, tenants later, emergency support, inspect system readiness | Daily packet review as default workflow |
-| Claims ops lead | `manager` | Team lead, queue owner, BPO/TPA supervisor | Monitor queue, assign/escalate work later, approve final export, check SLA/rework risk | Change infrastructure/provider secrets |
+| Claims ops lead | `manager` | Team lead, queue owner, BPO/TPA supervisor | Monitor queue, assign review tasks, adjust priority/due dates, approve final export, check SLA/rework risk manually | Change infrastructure/provider secrets |
 | Evidence reviewer | `reviewer` | Claims reviewer, intake QA, nurse/medical reviewer depending workflow | Review extracted fields, resolve exceptions, request missing evidence, approve packet for release | Export final data without manager/admin permission |
 | Compliance auditor | `auditor` | QA/compliance reviewer, client oversight, internal audit | Read packets, audit events, provider decisions, review history | Mutate packet data or run processing |
 | External system | `integration` | Claims system, TPA portal, BPO intake pipeline, SFTP/email ingest service | Create/read packets through API, trigger processing, poll jobs, export approved structured result | Act as a human reviewer or read audit by default |
@@ -43,13 +43,13 @@ The first surface should not include broad analytics, autonomous claim decisions
 | Functionality | User | Current Status | Backend Owner | Next Real Step |
 | --- | --- | --- | --- | --- |
 | Login/persona selection | All | Dev RBAC login sends `X-Actor` and `X-Role` | `services/web`, `packages/security` | Replace with real auth provider later, preserve role matrix |
-| Packet intake | Manager, reviewer, integration | API and UI create packets with text payloads | `services/api`, `packages/workflow` | Add real file upload UI using existing multipart API and MinIO storage |
-| Source document storage | Manager, reviewer | Backend has object store boundary and MinIO | `packages/storage`, `services/api` | Add document preview/download endpoint and UI viewer |
+| Packet intake | Manager, reviewer, integration | API and UI create packets with source-file upload and optional fallback text | `services/api`, `packages/workflow` | Add intake connectors later |
+| Source document storage | Manager, reviewer | Backend has object store boundary, MinIO, and source preview/download endpoint | `packages/storage`, `services/api` | Add richer page-level preview and OCR artifacts |
 | Processing job | Manager, reviewer, integration | Redis worker processes packet job | `services/worker`, `packages/jobs` | Add retry/error display and provider artifact persistence |
-| OCR/document parsing | Worker | Mock OCR only in default route | `packages/providers` | Add local PDF text extraction before any paid OCR |
-| Classification/extraction | Worker/API | Deterministic insurance rules | `packages/providers`, `packages/workflow` | Add field correction endpoint and benchmark provider fixtures |
-| Completeness checklist | Reviewer, manager | Rules exist for packet review tasks | `packages/workflow` | Make task-level review/correction persistent |
-| Human approval | Reviewer, manager | Packet-level review endpoint exists | `packages/workflow` | Split approve/reject/task correction into real reviewer workflow |
+| OCR/document parsing | Worker | Mock OCR plus local digital-PDF text extraction for embedded-text PDFs | `packages/providers` | Add OCR router/cache and scanned-document OCR experiments later |
+| Classification/extraction | Worker/API | Deterministic insurance rules plus reviewer field correction | `packages/providers`, `packages/workflow` | Add better provider fixtures and page-level citations |
+| Completeness checklist and review queue | Reviewer, manager | Rules create packet review tasks; tasks can be resolved/reopened, assigned, prioritized, given due dates, and filtered in the review queue | `packages/workflow`, `services/api`, `services/web` | Add SLA/escalation automation, notifications, and saved queues |
+| Human approval | Reviewer, manager | Packet approval requires all open review tasks to be resolved first | `packages/workflow` | Add reject/request-change taxonomy and manager release policy |
 | Export | Manager, admin, integration | Approved JSON export only | `services/api`, `packages/workflow` | Add versioned export schema, CSV, webhook export later |
 | Audit trail | Auditor, manager, reviewer | Audit endpoint exists | `packages/workflow`, storage repo | Add correction/provider/job events and audit filters |
 | System status | Admin, manager | `/ready` reports live provider metadata | `services/api`, provider registry | Add provider config page/read-only first |
@@ -58,9 +58,11 @@ The first surface should not include broad analytics, autonomous claim decisions
 
 NeuroDocOps should plug services at the backend boundary, not directly inside React components. The frontend should call NeuroDocOps API endpoints; the API/worker should choose providers through interfaces.
 
+The table below is a first-surface plugin map. "Current Provider" means implemented or directly wired in the current MVP foundation. "Future" interfaces are roadmap boundaries and should not be described as available product features until they exist in code and tests.
+
 | Plugin Area | Interface Or Package | Current Provider | First Practical Plug | Paid/Enterprise Plug Later | Where It Plugs In |
 | --- | --- | --- | --- | --- | --- |
-| OCR/document parsing | `OCRProvider`, future `DocumentParserProvider` | `MockOCRProvider` | Local PDF text extraction, Tesseract/Paddle/Surya experiment | Azure Document Intelligence, AWS Textract, Google Document AI, LlamaParse, ABBYY | Worker/provider router |
+| OCR/document parsing | `OCRProvider`, future `DocumentParserProvider` | `MockOCRProvider`; local digital-PDF text extraction for embedded text | Tesseract/Paddle/Surya experiment for scanned/simple pages | Azure Document Intelligence, AWS Textract, Google Document AI, LlamaParse, ABBYY | Worker/provider router |
 | Extraction/reasoning | `ExtractionProvider`, future `ReasoningProvider` | `RuleBasedInsuranceExtractionProvider` | Rule fixtures plus local deterministic extraction | OpenAI/Claude/Gemini/Azure OpenAI structured extraction | Worker/provider router |
 | Object storage | `ObjectStore` | In-memory, MinIO | MinIO for local/pilot | S3, Azure Blob, GCS, customer bucket | API upload/download and worker artifact reads |
 | Packet database | `PacketRepository` | In-memory, Postgres JSONB | Postgres | Managed Postgres/RDS/Cloud SQL | API/workflow repository |
@@ -71,6 +73,8 @@ NeuroDocOps should plug services at the backend boundary, not directly inside Re
 | Telemetry | Future `TelemetryProvider` | Local logs | OpenTelemetry local/Grafana | Sentry, Datadog, customer SIEM | API/worker instrumentation |
 | Secrets/config | Provider settings/env | `.env` | Docker secrets/local env | Doppler, AWS Secrets Manager, Azure Key Vault | App startup/provider registry |
 | Export delivery | Future `ExportProvider` | API JSON response | CSV/JSON file in object store | Webhook, SFTP, Guidewire/Duck Creek adapter | Worker export job/API trigger |
+
+For the detailed plugin/provider strategy, fit-test gates, and provider tier model, see `docs/pluggable-provider-development-plan.md` and `docs/pluggable-provider-test-plan.md`. For the runtime path across API, worker, web, storage, providers, RBAC, audit, and export, see `docs/system-flow.md`.
 
 ## API Versus Provider Rule
 

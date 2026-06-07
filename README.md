@@ -58,21 +58,32 @@ The MVP workflow:
 7. Export approved structured data for downstream claims systems
 8. Maintain audit logs for intake, classification, extraction, checklist evaluation, review, and export
 
-## Key Features
+## Product Capability Map
 
-- Multi-document upload and batch processing
-- OCR for scanned files, images, forms, and mixed document bundles
-- Table extraction from invoices, certificates, reports, and forms
-- Document classification by workflow, customer, or compliance category
-- Field extraction with confidence scores and validation rules
-- Human-in-the-loop review and correction
-- Search and question answering across document collections
-- Citation-backed answers linked to source pages and extracted fields
-- Compliance checklist automation
-- Approval routing and exception queues
-- Role-based access control for teams and clients
-- Audit logs for compliance-sensitive workflows
-- Export to CSV, Excel, JSON, external APIs, and workflow systems
+Implemented MVP foundation:
+
+- Claim packet intake through API and current web console.
+- Source-document upload to the configured object store, with source preview/download.
+- Local digital-PDF text extraction for PDFs that already contain embedded text.
+- Deterministic document classification and field extraction for insurance claim packet fixtures.
+- Review tasks, task-level resolve/reopen, field correction, human approval gate, JSON export, and audit events.
+- Development RBAC headers for local/test role simulation.
+- In-memory defaults with optional Postgres, Redis, and MinIO local stack.
+- Safe provider metadata through `/ready` without exposing secrets.
+
+Current limitations:
+
+- Local PDF text extraction is not scanned-document OCR and does not read image-only PDFs, photos, handwriting, complex forms, or tables.
+- Pasted evidence text remains useful for non-PDF files, scanned PDFs, demos, and deterministic fixtures.
+- Production auth, tenant isolation, SSO, live OCR, LLM reasoning, search, and export-delivery integrations are not implemented.
+
+Roadmap capabilities:
+
+- OCR for scanned files, images, forms, and mixed document bundles.
+- Table extraction from invoices, certificates, reports, and forms.
+- Search and question answering across document collections.
+- Tenant-aware auth/identity/SSO.
+- CSV, Excel, webhook, SFTP, object-store artifact, and downstream-system export delivery.
 
 ## Example Workflow
 
@@ -87,7 +98,8 @@ The MVP workflow:
 
 ```text
 Document Upload
-  -> OCR and Layout Parsing
+  -> Local PDF Text Extraction when embedded text is available
+  -> OCR and Layout Parsing later for scans, images, forms, and tables
   -> Document Classification
   -> Field and Table Extraction
   -> Validation Rules
@@ -98,17 +110,50 @@ Document Upload
   -> Audit and Analytics
 ```
 
-Potential technical components:
+Implemented technical components:
 
-- OCR: Azure Document Intelligence, Google Document AI, AWS Textract, PaddleOCR, or Tesseract
-- Extraction: layout-aware models, LLM-based structured extraction, schema validation, deterministic rules
-- Search: vector database plus full-text search
-- Backend: FastAPI, Django, NestJS, or similar service framework
-- Frontend: review dashboard, document viewer, field correction UI, workflow queue
-- Storage: object storage for files, relational database for metadata and extracted fields
-- Security: tenant isolation, encryption, role-based access, audit logs
+- Local parsing: digital-PDF text extraction for PDFs with embedded text.
+- OCR provider contract: deterministic mock OCR for tests and local fixtures.
+- Extraction: deterministic insurance rules with confidence scores and citation-oriented metadata.
+- Backend: FastAPI service with workflow, repository, provider, object-store, queue, and RBAC boundaries.
+- Frontend: reviewer console for intake, source upload, review tasks, field correction, approval, audit, and JSON export.
+- Storage: in-memory defaults with optional Postgres and MinIO.
+- Security: development RBAC through `X-Actor` and `X-Role` headers.
 
-Provider strategy: NeuroDocOps should be pluggable and tiered. The proof-of-concept should default to free/local providers, then allow better paid services as quality, compliance, or customer requirements increase. OCR, LLM reasoning, storage, database, queueing, auth, intake, search, document rendering, monitoring, secrets, billing, and hosting should all sit behind provider interfaces. See `docs/pluggable-provider-development-plan.md`, `docs/pluggable-provider-test-plan.md`, and `docs/ocr-provider-strategy.md`.
+Roadmap technical components:
+
+- OCR/layout: Azure Document Intelligence, Google Document AI, AWS Textract, PaddleOCR, Surya, Tesseract, LlamaParse, or ABBYY after fit testing.
+- Reasoning/search: LLM structured extraction, vector/full-text search, and question answering.
+- Security: real auth, tenant isolation, SSO, token validation, and production identity enforcement.
+
+Provider strategy: NeuroDocOps should be pluggable and tiered. The proof-of-concept should default to free/local providers, then allow better paid services as quality, compliance, or customer requirements increase. OCR, LLM reasoning, storage, database, queueing, auth, intake, search, document rendering, monitoring, secrets, billing, and hosting should all sit behind provider interfaces. See `docs/pluggable-provider-development-plan.md`, `docs/pluggable-provider-test-plan.md`, `docs/ocr-provider-strategy.md`, and `docs/system-flow.md`.
+
+## Provider And Plugin Facility
+
+In NeuroDocOps, the plugin facility means configured adapters behind stable backend contracts. It does not currently mean a public plugin marketplace, customer-uploaded runtime code, or a no-code extension builder.
+
+Implemented today:
+
+- `OCRProvider` and `ExtractionProvider` contracts.
+- Deterministic `MockOCRProvider` for local/test processing.
+- Local digital-PDF text extraction for source PDFs that already contain embedded text.
+- Rule-based insurance extraction provider.
+- `PacketRepository` with in-memory and Postgres JSONB-backed implementations.
+- `ObjectStore` with in-memory and MinIO implementations.
+- `JobQueue` with in-memory and Redis implementations.
+- Development RBAC through `X-Actor` and `X-Role` headers.
+- `/ready` provider metadata that reports safe provider names, tiers, live flags, and adapter status without exposing secrets.
+
+Roadmap/provider areas:
+
+- OCR/document parsing providers for scanned PDFs, images, forms, tables, handwriting, and mixed bundles, such as open-source OCR, Azure Document Intelligence, AWS Textract, Google Document AI, LlamaParse, or ABBYY.
+- Extraction/reasoning providers such as deterministic rules, local/recorded fixtures, or opt-in LLM structured extraction.
+- Auth/identity providers such as Keycloak, Auth0, Cognito, or Azure Entra ID.
+- Search, intake, telemetry, secrets/config, and export-delivery providers.
+
+Default behavior must remain safe: no paid OCR/model provider is required for local development, unit tests, stack smoke tests, or the first claim packet benchmark. Paid/live providers should only run when explicitly enabled through provider-specific configuration and live-provider flags.
+
+For the detailed plugin/provider plan, see `docs/pluggable-provider-development-plan.md`. For the runtime path across services, see `docs/system-flow.md`.
 
 ## Current Implementation
 
@@ -256,14 +301,14 @@ Important requirements:
 - Document classification
 - Structured field extraction with citations
 - Claim completeness checklist
-- Human review tasks
+- Human review tasks with resolve/reopen actions, assignment metadata, priority/due dates, and queue filters
 - Approval and JSON export
 - Audit event stream
 
 ### Phase 2: Workflow Automation
 
 - Approval flows
-- Team roles and task queues
+- SLA/escalation automation, notifications, and saved/shared task queues
 - API integrations
 - Custom extraction templates
 - Compliance checklist automation

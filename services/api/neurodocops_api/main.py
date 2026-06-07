@@ -5,15 +5,15 @@ import re
 from uuid import UUID
 from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, Response, UploadFile, status
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 
-from packages.domain.neurodocops_domain.models import AuditEvent, ClaimDocumentCreate, ClaimPacketCreate, ClaimPacketRecord, ExportSummary, FieldCorrectionRequest, ReviewRequest
+from packages.domain.neurodocops_domain.models import AuditEvent, ClaimDocumentCreate, ClaimPacketCreate, ClaimPacketRecord, ExportSummary, FieldCorrectionRequest, ReviewRequest, ReviewTaskPriority, ReviewTaskQueueItem, ReviewTaskResolutionRequest, ReviewTaskStatus, ReviewTaskUpdateRequest
 from packages.jobs.neurodocops_jobs import JobEnvelope, JobQueue, JobStatusRecord, JobType, PacketProcessRequest, create_job_queue
 from packages.providers.neurodocops_providers import ProviderRegistry, create_provider_registry
 from packages.security.neurodocops_security import AccessDeniedError, ActorContext, Permission, actor_from_headers, require_permission
 from packages.storage.neurodocops_storage import ObjectStore, create_object_store, create_packet_repository
-from packages.workflow.neurodocops_workflow import ClaimPacketWorkflowService, PacketNotFoundError, WorkflowConflictError
+from packages.workflow.neurodocops_workflow import ClaimPacketWorkflowService, PacketNotFoundError, ReviewTaskNotFoundError, WorkflowConflictError
 
 
 def create_app(
@@ -22,10 +22,21 @@ def create_app(
     object_store: ObjectStore | None = None,
     provider_registry: ProviderRegistry | None = None,
 ) -> FastAPI:
-    registry = provider_registry or (create_provider_registry() if service is None else None)
-    workflow_service = service or ClaimPacketWorkflowService(repository=create_packet_repository(), provider_registry=registry)
-    queue = job_queue or create_job_queue()
     store = object_store or create_object_store()
+
+    def load_source_bytes(document):
+        if document.source_object is None:
+            return None
+        try:
+            return store.get_bytes(document.source_object.key)
+        except KeyError:
+            return None
+
+    if provider_registry is not None:
+        provider_registry._source_bytes_loader = load_source_bytes
+    registry = provider_registry or (create_provider_registry(source_bytes_loader=load_source_bytes) if service is None else None)
+    workflow_service = service or ClaimPacketWorkflowService(repository=create_packet_repository(), provider_registry=registry, source_bytes_loader=load_source_bytes)
+    queue = job_queue or create_job_queue()
     app = FastAPI(
         title="NeuroDocOps API",
         version="0.2.0",
@@ -70,6 +81,14 @@ def create_app(
                 raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         return {"status": "ready", "service": "api", "providers": workflow_service.active_provider_payload()}
 
+    @app.get("/system/provider-configuration")
+    def provider_configuration(x_actor: str | None = Header(default=None), x_role: str | None = Header(default=None)) -> dict[str, object]:
+        _require_headers_permission(x_actor, x_role, Permission.AUDIT_READ)
+        active_registry = provider_registry or getattr(workflow_service, "_provider_registry", None)
+        if active_registry is None:
+            active_registry = create_provider_registry()
+        return active_registry.configuration_payload()
+
     @app.post("/claim-packets", response_model=ClaimPacketRecord, status_code=status.HTTP_201_CREATED)
     def intake_claim_packet(payload: ClaimPacketCreate, x_actor: str | None = Header(default=None), x_role: str | None = Header(default=None)) -> ClaimPacketRecord:
         _require_headers_permission(x_actor, x_role, Permission.PACKET_CREATE)
@@ -79,6 +98,25 @@ def create_app(
     def list_claim_packets(x_actor: str | None = Header(default=None), x_role: str | None = Header(default=None)) -> list[ClaimPacketRecord]:
         _require_headers_permission(x_actor, x_role, Permission.PACKET_READ)
         return workflow_service.list_packets()
+
+    @app.get("/review-tasks", response_model=list[ReviewTaskQueueItem])
+    def list_review_tasks(
+        assignee: str | None = None,
+        status_filter: ReviewTaskStatus | None = Query(default=ReviewTaskStatus.OPEN, alias="status"),
+        priority: ReviewTaskPriority | None = None,
+        due_before: str | None = None,
+        unassigned: bool = False,
+        x_actor: str | None = Header(default=None),
+        x_role: str | None = Header(default=None),
+    ) -> list[ReviewTaskQueueItem]:
+        _require_headers_permission(x_actor, x_role, Permission.REVIEW_TASK_READ)
+        return workflow_service.list_review_queue(
+            assignee=assignee,
+            status=status_filter,
+            priority=priority,
+            due_before=_parse_datetime_query(due_before),
+            unassigned=unassigned,
+        )
 
     @app.get("/claim-packets/{packet_id}", response_model=ClaimPacketRecord)
     def get_claim_packet(packet_id: UUID, x_actor: str | None = Header(default=None), x_role: str | None = Header(default=None)) -> ClaimPacketRecord:
@@ -103,7 +141,7 @@ def create_app(
     async def upload_claim_packet_document(
         packet_id: UUID,
         file: UploadFile = File(...),
-        text: str = Form(...),
+        text: str = Form(""),
         metadata: str | None = Form(None),
         x_actor: str | None = Header(default=None),
         x_role: str | None = Header(default=None),
@@ -126,7 +164,7 @@ def create_app(
         source_object = store.put_bytes(key, data, content_type)
         document = ClaimDocumentCreate(
             filename=filename,
-            text=text,
+            text=text.strip(),
             content_type=content_type,
             source_object=source_object,
             metadata=parsed_metadata,
@@ -178,11 +216,48 @@ def create_app(
 
     @app.post("/claim-packets/{packet_id}/review", response_model=ClaimPacketRecord)
     def complete_claim_packet_review(packet_id: UUID, review: ReviewRequest, x_actor: str | None = Header(default=None), x_role: str | None = Header(default=None)) -> ClaimPacketRecord:
-        _require_headers_permission(x_actor, x_role, Permission.REVIEW_COMPLETE)
+        actor = _require_headers_permission(x_actor, x_role, Permission.REVIEW_COMPLETE)
+        review = review.model_copy(update={"reviewer": actor.actor_id})
         try:
             return workflow_service.complete_review(packet_id, review)
         except PacketNotFoundError as exc:
             raise _not_found(packet_id) from exc
+        except WorkflowConflictError as exc:
+            raise _conflict(str(exc)) from exc
+
+    @app.post("/claim-packets/{packet_id}/review-tasks/{task_id}/resolve", response_model=ClaimPacketRecord)
+    def resolve_claim_packet_review_task(packet_id: UUID, task_id: UUID, request: ReviewTaskResolutionRequest, x_actor: str | None = Header(default=None), x_role: str | None = Header(default=None)) -> ClaimPacketRecord:
+        actor = _require_headers_permission(x_actor, x_role, Permission.REVIEW_COMPLETE)
+        try:
+            return workflow_service.resolve_review_task(packet_id, task_id, actor.actor_id, notes=request.notes)
+        except PacketNotFoundError as exc:
+            raise _not_found(packet_id) from exc
+        except ReviewTaskNotFoundError as exc:
+            raise _task_not_found(task_id) from exc
+        except WorkflowConflictError as exc:
+            raise _conflict(str(exc)) from exc
+
+    @app.post("/claim-packets/{packet_id}/review-tasks/{task_id}/reopen", response_model=ClaimPacketRecord)
+    def reopen_claim_packet_review_task(packet_id: UUID, task_id: UUID, request: ReviewTaskResolutionRequest, x_actor: str | None = Header(default=None), x_role: str | None = Header(default=None)) -> ClaimPacketRecord:
+        actor = _require_headers_permission(x_actor, x_role, Permission.REVIEW_COMPLETE)
+        try:
+            return workflow_service.reopen_review_task(packet_id, task_id, actor.actor_id, notes=request.notes)
+        except PacketNotFoundError as exc:
+            raise _not_found(packet_id) from exc
+        except ReviewTaskNotFoundError as exc:
+            raise _task_not_found(task_id) from exc
+        except WorkflowConflictError as exc:
+            raise _conflict(str(exc)) from exc
+
+    @app.patch("/claim-packets/{packet_id}/review-tasks/{task_id}", response_model=ClaimPacketRecord)
+    def update_claim_packet_review_task(packet_id: UUID, task_id: UUID, request: ReviewTaskUpdateRequest, x_actor: str | None = Header(default=None), x_role: str | None = Header(default=None)) -> ClaimPacketRecord:
+        actor = _require_headers_permission(x_actor, x_role, Permission.REVIEW_TASK_UPDATE)
+        try:
+            return workflow_service.update_review_task(packet_id, task_id, actor.actor_id, request.model_dump(exclude_unset=True))
+        except PacketNotFoundError as exc:
+            raise _not_found(packet_id) from exc
+        except ReviewTaskNotFoundError as exc:
+            raise _task_not_found(task_id) from exc
         except WorkflowConflictError as exc:
             raise _conflict(str(exc)) from exc
 
@@ -227,8 +302,23 @@ def _not_found(packet_id: UUID) -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Claim packet not found: {packet_id}")
 
 
+def _task_not_found(task_id: UUID) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Review task not found: {task_id}")
+
+
 def _conflict(detail: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
+
+
+def _parse_datetime_query(value: str | None):
+    if value is None:
+        return None
+    try:
+        from datetime import datetime
+
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="due_before must be an ISO datetime.") from exc
 
 
 def _require_headers_permission(actor: str | None, role: str | None, permission: Permission) -> ActorContext:

@@ -4,6 +4,7 @@ import json
 from uuid import UUID
 
 from redis import Redis
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from .models import JobEnvelope, JobStatus, JobStatusRecord
 
@@ -24,7 +25,10 @@ class RedisJobQueue:
         return status
 
     def dequeue(self, timeout_seconds: int = 5) -> JobEnvelope | None:
-        item = self._redis.brpop(self._queue_name, timeout=timeout_seconds)
+        try:
+            item = self._redis.brpop(self._queue_name, timeout=timeout_seconds)
+        except RedisTimeoutError:
+            return None
         if item is None:
             return None
         _, payload = item

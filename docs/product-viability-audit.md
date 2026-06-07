@@ -66,7 +66,7 @@ But the product capability is still early:
 - Uploaded files still require a temporary `text` field.
 - Extraction is regex/rule-based, not robust document understanding.
 - Citations are snippets, not page/bounding-box evidence.
-- Field correction now exists, but task-level review resolution is still packet-level.
+- Field correction, task-level review resolution, assignment metadata, priority/due dates, and filterable review queue ownership now exist with audit-oriented workflow proof, but SLA breach detection, escalation automation, notifications, and saved/shared queues are still missing.
 - Dev header RBAC exists, but no tenant isolation, SSO, or real compliance posture exists.
 - Export is still basic JSON.
 - The frontend is a demo reviewer console, not yet a production workstation.
@@ -445,7 +445,7 @@ Build only what proves the product loop:
 3. Source document preview/download. Current endpoint exists; next step is richer page-level preview.
 4. Field-level citations linked to document pages.
 5. Field correction endpoint and UI. Current first pass exists with audit proof.
-6. Task-level review resolution endpoint and UI.
+6. Harden review assignment and queue filtering; add SLA/escalation automation, notifications, and saved exception queues.
 7. Basic org/user/auth model.
 8. Tenant-scoped packets and object keys.
 9. Export artifact download: JSON/CSV.

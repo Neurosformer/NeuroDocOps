@@ -12,6 +12,21 @@ The product should support this rule:
 
 This means every expensive dependency must sit behind an interface. The workflow should not care whether OCR comes from mock OCR, PaddleOCR, Azure, AWS, Google, LlamaParse, or ABBYY. The same rule applies to storage, queueing, auth, search, monitoring, secrets, intake, and hosting.
 
+## What "Plugin Facility" Means In The MVP
+
+In NeuroDocOps, the plugin facility means configured provider, repository, object-store, queue, identity, search, intake, telemetry, secret/config, and export-delivery adapters behind stable application contracts.
+
+It does not currently mean a public marketplace, untrusted third-party runtime plugins, customer-uploaded code, or a no-code extension builder. Adapters are selected by configuration and wired into the API/worker at service startup or through the provider router.
+
+The goal is to keep the claims packet workflow provider-neutral:
+
+- The API exposes claim packet, document, review, audit, job, and export concepts.
+- The worker performs long-running provider-backed work such as OCR, parsing, extraction, checklist processing, and future export delivery.
+- Storage, object storage, queueing, identity, search, telemetry, secrets, intake, and export delivery are swappable at system boundaries.
+- Local/free providers remain the default.
+- Paid/live providers require explicit opt-in configuration and fit-test evidence.
+- Provider failures create clear job errors, review tasks, audit entries, or telemetry events rather than silently corrupting packet data.
+
 ## Provider Tier Model
 
 Every provider area should support at least three tiers.
@@ -25,23 +40,23 @@ Every provider area should support at least three tiers.
 
 The first implementation should always start at Tier 0/Tier 1, then route upward only when needed.
 
-## Provider Areas
+## Plugin / Provider Areas
 
-| Area | Interface To Build | Tier 0 / Low-Cost | Paid / Better Providers | POC Priority |
-| --- | --- | --- | --- | --- |
-| OCR / document parsing | `OCRProvider`, `DocumentParserProvider`, `ProviderRouter` | Mock OCR, PDF text extraction, PaddleOCR/Surya experiments | Azure DI, Google Document AI, AWS Textract, LlamaParse, ABBYY | High |
-| LLM / structured reasoning | `ReasoningProvider`, `StructuredExtractionProvider` | Off, deterministic rules | GPT, Claude, Gemini, Azure OpenAI | Medium |
-| Object storage | `ObjectStore` | In-memory, MinIO | S3, Azure Blob, GCS, customer bucket | Done foundation |
-| Database | `PacketRepository` plus future normalized repos | In-memory, local Postgres | Managed Postgres/RDS/Azure PostgreSQL/Cloud SQL | Done foundation |
-| Queue / background jobs | `JobQueue` | In-memory, local Redis | Managed Redis, SQS, Cloud Tasks, Celery/Dramatiq | Done foundation |
-| Auth / identity | `IdentityProvider`, `PermissionProvider` | Dev actor header, mock users | Auth0, Clerk, Keycloak, Cognito, Azure Entra ID | High |
-| Email/file intake | `IntakeProvider` | Manual upload/API | SendGrid, Mailgun, Graph API, Gmail API, SFTP | Medium |
-| Search/indexing | `SearchProvider` | Postgres full-text | OpenSearch, Elasticsearch, Meilisearch, vector DB | Medium |
-| Document viewer/rendering | `DocumentRenderProvider` | Browser PDF viewer, PDF.js | PSPDFKit, cloud rendering, page image rendering | High |
-| Monitoring/logging | `TelemetryProvider` | Local logs | Sentry, Datadog, OpenTelemetry, Grafana | Medium |
-| Secrets/config | `SecretProvider` | `.env` | Doppler, AWS Secrets Manager, Azure Key Vault, GCP Secret Manager | Medium |
-| Payments/billing | `BillingProvider` | None/manual invoice | Stripe | Low |
-| Deployment/hosting | deployment adapter/runbook | Docker Compose | Fly.io, Render, Railway, AWS, Azure, GCP, customer VPC | Medium |
+| Plugin Area | Interface / Boundary | Implemented Today | Safe Local / Free Default | Paid / Enterprise Later | Current Status |
+| --- | --- | --- | --- | --- | --- |
+| OCR/document parsing | `OCRProvider`, future `DocumentParserProvider`, provider router/cache | `MockOCRProvider` plus local digital-PDF text extraction for embedded-text PDFs | Mock OCR, local PDF text extraction, recorded fixtures | Azure Document Intelligence, AWS Textract, Google Document AI, LlamaParse, ABBYY | Local source-byte PDF parser implemented; scanned OCR/layout parsing remains roadmap |
+| Extraction/reasoning | `ExtractionProvider`, future `ReasoningProvider` / `StructuredExtractionProvider` | `RuleBasedInsuranceExtractionProvider` | Deterministic insurance rules and benchmark fixtures | OpenAI, Claude, Gemini, Azure OpenAI structured extraction | Rule-based extraction implemented; LLM reasoning roadmap |
+| Object storage | `ObjectStore` | In-memory and MinIO | In-memory for tests, MinIO for local stack | S3, Azure Blob, GCS, customer bucket | Implemented foundation |
+| Database | `PacketRepository` | In-memory and Postgres JSONB-backed repository | In-memory for tests, local Postgres for stack | Managed Postgres/RDS/Cloud SQL/Azure PostgreSQL | Implemented foundation |
+| Queue/jobs | `JobQueue` | In-memory and Redis-backed queue | In-memory for one-process tests, Redis for local stack | Managed Redis, SQS, Cloud Tasks, Celery/Dramatiq | Implemented foundation |
+| Auth/identity | `packages/security`, future `IdentityProvider` and `PermissionProvider` | Development `X-Actor` / `X-Role` headers | Dev headers and seeded/mock users | Keycloak, Auth0, Cognito, Azure Entra ID, customer SSO | Dev RBAC implemented; real auth/tenant/SSO roadmap |
+| Search | Future `SearchProvider` | None | Postgres full-text roadmap | OpenSearch, Elasticsearch, Meilisearch, vector DB | Roadmap |
+| Intake | Future `IntakeProvider` | Manual web/API packet creation | Manual upload/API | Email parser, SFTP, webhook, Graph API, Gmail API, claims portal adapter | Manual/API intake foundation; provider roadmap |
+| Telemetry | Future `TelemetryProvider` | Local logs/readiness metadata | Structured local logs, future OpenTelemetry local stack | Sentry, Datadog, customer SIEM | Mostly roadmap |
+| Secrets/config | Environment/provider settings | `.env` and env-var selected backends | `.env`, Docker Compose env, Docker secrets roadmap | Doppler, AWS Secrets Manager, Azure Key Vault, GCP Secret Manager | Basic env config implemented; secret providers roadmap |
+| Export delivery | Future `ExportProvider` | Approval-gated API JSON response | JSON response, future object-store export artifact | CSV, webhook, SFTP, Guidewire/Duck Creek adapter | Approved JSON export implemented; delivery providers roadmap |
+
+The plugin facility must preserve the approval-gated claims packet workflow. A provider may assist OCR, extraction, search, intake, telemetry, or export delivery, but it must not bypass review tasks, human approval, RBAC checks, audit events, or export safety.
 
 ## Design Principles
 

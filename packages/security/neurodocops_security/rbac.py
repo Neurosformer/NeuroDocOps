@@ -24,6 +24,8 @@ class Permission(str, Enum):
     DOCUMENT_UPLOAD = "document:upload"
     PACKET_PROCESS = "packet:process"
     REVIEW_COMPLETE = "review:complete"
+    REVIEW_TASK_READ = "review_task:read"
+    REVIEW_TASK_UPDATE = "review_task:update"
     EXPORT_PACKET = "export:packet"
     AUDIT_READ = "audit:read"
     JOB_READ = "job:read"
@@ -42,6 +44,8 @@ ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
         Permission.DOCUMENT_UPLOAD,
         Permission.PACKET_PROCESS,
         Permission.REVIEW_COMPLETE,
+        Permission.REVIEW_TASK_READ,
+        Permission.REVIEW_TASK_UPDATE,
         Permission.EXPORT_PACKET,
         Permission.AUDIT_READ,
         Permission.JOB_READ,
@@ -52,17 +56,21 @@ ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
         Permission.DOCUMENT_UPLOAD,
         Permission.PACKET_PROCESS,
         Permission.REVIEW_COMPLETE,
+        Permission.REVIEW_TASK_READ,
+        Permission.REVIEW_TASK_UPDATE,
         Permission.AUDIT_READ,
         Permission.JOB_READ,
     },
     Role.AUDITOR: {
         Permission.PACKET_READ,
+        Permission.REVIEW_TASK_READ,
         Permission.AUDIT_READ,
         Permission.JOB_READ,
     },
     Role.INTEGRATION: {
         Permission.PACKET_CREATE,
         Permission.PACKET_READ,
+        Permission.DOCUMENT_UPLOAD,
         Permission.PACKET_PROCESS,
         Permission.EXPORT_PACKET,
         Permission.JOB_READ,

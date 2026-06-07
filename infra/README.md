@@ -18,3 +18,13 @@ docker compose up --build
 ```
 
 The API and worker use the in-memory `PacketRepository`, object store, and job queue by default for one-process local runs. This compose stack sets `NEURODOCOPS_STORAGE_BACKEND=postgres`, so packet and audit snapshots are stored in Postgres through the shared repository boundary. It sets `NEURODOCOPS_JOB_QUEUE_BACKEND=redis`, so `POST /claim-packets/{packet_id}/process` enqueues jobs consumed by the worker. It also sets `NEURODOCOPS_OBJECT_STORAGE_BACKEND=minio`, so `POST /claim-packets/{packet_id}/documents` stores uploaded source bytes in MinIO while packet metadata stays in Postgres.
+
+## Provider/Plugin Defaults In Local Infra
+
+The local Compose stack enables durable local infrastructure providers only:
+
+- Postgres through `PacketRepository`.
+- Redis through `JobQueue`.
+- MinIO through `ObjectStore`.
+
+It does not enable paid OCR, paid model reasoning, production auth, managed search, external telemetry, secret-manager providers, intake connectors, or export-delivery connectors. Those remain opt-in provider areas and should require explicit configuration, live-provider flags, and fit-test evidence before use.

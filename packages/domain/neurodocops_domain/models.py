@@ -36,6 +36,13 @@ class ReviewTaskStatus(str, Enum):
     RESOLVED = "resolved"
 
 
+class ReviewTaskPriority(str, Enum):
+    LOW = "low"
+    NORMAL = "normal"
+    HIGH = "high"
+    URGENT = "urgent"
+
+
 class ReviewDecision(str, Enum):
     APPROVE = "approve"
     REQUEST_CHANGES = "request_changes"
@@ -83,7 +90,7 @@ class SourceObjectRef(BaseModel):
 
 class ClaimDocumentCreate(BaseModel):
     filename: str = Field(min_length=1)
-    text: str = Field(min_length=1, description="OCR or extracted text for the MVP workflow")
+    text: str = Field(default="", description="Optional fallback OCR or extracted text for unsupported source files")
     content_type: str = Field(default="application/pdf", min_length=1)
     source_object: SourceObjectRef | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -100,7 +107,7 @@ class ClaimPacketCreate(BaseModel):
 class ClaimDocumentRecord(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     filename: str
-    text: str
+    text: str = ""
     content_type: str = "application/pdf"
     source_object: SourceObjectRef | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -126,6 +133,18 @@ class ReviewTask(BaseModel):
     resolved_at: datetime | None = None
     reviewer: str | None = None
     notes: str | None = None
+    assignee: str | None = None
+    priority: ReviewTaskPriority = ReviewTaskPriority.NORMAL
+    due_at: datetime | None = None
+
+
+class ReviewTaskQueueItem(BaseModel):
+    packet_id: UUID
+    claim_reference: str
+    claimant_name: str
+    loss_type: str
+    packet_status: PacketStatus
+    task: ReviewTask
 
 
 class ClaimPacketRecord(BaseModel):
@@ -154,6 +173,17 @@ class ReviewRequest(BaseModel):
 class FieldCorrectionRequest(BaseModel):
     value: str = Field(min_length=1)
     reviewer: str = Field(min_length=1)
+    notes: str | None = None
+
+
+class ReviewTaskResolutionRequest(BaseModel):
+    notes: str | None = None
+
+
+class ReviewTaskUpdateRequest(BaseModel):
+    assignee: str | None = None
+    priority: ReviewTaskPriority | None = None
+    due_at: datetime | None = None
     notes: str | None = None
 
 
@@ -186,6 +216,10 @@ class AuditAction(str, Enum):
     FIELDS_EXTRACTED = "fields_extracted"
     FIELD_CORRECTED = "field_corrected"
     CHECKLIST_EVALUATED = "checklist_evaluated"
+    REVIEW_TASK_ASSIGNED = "review_task_assigned"
+    REVIEW_TASK_UPDATED = "review_task_updated"
+    REVIEW_TASK_RESOLVED = "review_task_resolved"
+    REVIEW_TASK_REOPENED = "review_task_reopened"
     REVIEW_COMPLETED = "review_completed"
     PACKET_EXPORTED = "packet_exported"
 

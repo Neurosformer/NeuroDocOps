@@ -34,7 +34,7 @@ If expanding the frontend, keep these screens:
 1. Packet dashboard with status, document count, checklist failures, and open review tasks.
 2. New packet intake screen using text-based document input until multipart upload exists.
 3. Packet workspace with workflow stepper, document list, extracted fields, checklist, review tasks, and audit summary.
-4. Review queue synthesized from packet review tasks until a dedicated review-task API exists.
+4. Review queue synthesized from packet review tasks; task-level resolve/reopen, assignment metadata, priority/due dates, and queue filters now back individual exception handling and ownership.
 5. Audit timeline for packet events.
 6. Export preview that copies/downloads JSON and disables export until backend approval rules pass.
 
@@ -63,8 +63,8 @@ The first-surface operating model is documented in `docs/first-surface-operating
 
 - Field correction endpoint and reviewer UI are implemented for extracted fields.
 - Correction audit events are implemented for corrected field values.
-- Task-level review resolution endpoints remain.
-- Frontend review console exists; continue making it source-document and audit-proof oriented.
+- Task-level review resolution endpoints and reviewer UI are implemented with RBAC headers, audit events, and export gating.
+- Frontend review console exists with task-level review actions, assignment metadata, priority/due dates, and queue filters; continue improving source-document evidence, audit proof, SLA/escalation automation, and saved queue workflows.
 
 ### Milestone 3: Pilot Backend
 

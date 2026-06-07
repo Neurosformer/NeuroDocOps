@@ -175,6 +175,19 @@ def run_smoke_test(args: argparse.Namespace) -> None:
     assert_true(any(document["document_type"] != "unknown" for document in processed["documents"]), "documents classified")
     assert_true(any(document["extracted_fields"] for document in processed["documents"]), "fields extracted")
 
+    resolved = processed
+    for task in processed["review_tasks"]:
+        if task["status"] != "open":
+            continue
+        _, resolved = request_json(
+            "POST",
+            f"{args.api_url}/claim-packets/{packet_id}/review-tasks/{task['id']}/resolve",
+            {"notes": "Resolved during smoke test review."},
+        )
+        assert_true(isinstance(resolved, dict), "task resolution returned JSON object")
+
+    assert_true(all(task["status"] == "resolved" for task in resolved["review_tasks"]), "review tasks resolved")
+
     _, approved = request_json(
         "POST",
         f"{args.api_url}/claim-packets/{packet_id}/review",
@@ -182,7 +195,6 @@ def run_smoke_test(args: argparse.Namespace) -> None:
     )
     assert_true(isinstance(approved, dict), "review returned JSON object")
     assert_equal(approved["status"], "approved", "approved packet status")
-    assert_true(all(task["status"] == "resolved" for task in approved["review_tasks"]), "review tasks resolved")
 
     _, exported = request_json("POST", f"{args.api_url}/claim-packets/{packet_id}/export")
     assert_true(isinstance(exported, dict), "export returned JSON object")
@@ -194,7 +206,8 @@ def run_smoke_test(args: argparse.Namespace) -> None:
     _, audit = request_json("GET", f"{args.api_url}/claim-packets/{packet_id}/audit")
     assert_true(isinstance(audit, list), "audit returned JSON list")
     actions = [event["action"] for event in audit]
-    assert_equal(actions[-6:], ["packet_intaked", "documents_classified", "fields_extracted", "checklist_evaluated", "review_completed", "packet_exported"], "audit action sequence")
+    assert_true("review_task_resolved" in actions, "review task resolution audit action")
+    assert_equal(actions[-2:], ["review_completed", "packet_exported"], "final audit action sequence")
     print("Smoke test: passed")
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import datetime, timezone
 from uuid import UUID
 
 from packages.domain.neurodocops_domain.models import (
@@ -18,6 +20,8 @@ from packages.domain.neurodocops_domain.models import (
     PacketStatus,
     ReviewDecision,
     ReviewRequest,
+    ReviewTaskPriority,
+    ReviewTaskQueueItem,
     ReviewTask,
     ReviewTaskStatus,
     utc_now,
@@ -39,6 +43,10 @@ class WorkflowConflictError(RuntimeError):
     pass
 
 
+class ReviewTaskNotFoundError(LookupError):
+    pass
+
+
 class ClaimPacketWorkflowService:
     """Insurance claims packet workflow service.
 
@@ -53,10 +61,14 @@ class ClaimPacketWorkflowService:
         extraction_provider: ExtractionProvider | None = None,
         repository: PacketRepository | None = None,
         provider_registry: ProviderRegistry | None = None,
+        source_bytes_loader: Callable[[ClaimDocumentRecord], bytes | None] | None = None,
     ) -> None:
+        self._source_bytes_loader = source_bytes_loader
         self._provider_registry = provider_registry
+        if self._provider_registry is not None and source_bytes_loader is not None:
+            self._provider_registry._source_bytes_loader = source_bytes_loader
         if ocr_provider is None or extraction_provider is None:
-            self._provider_registry = self._provider_registry or create_provider_registry()
+            self._provider_registry = self._provider_registry or create_provider_registry(source_bytes_loader=source_bytes_loader)
         self._ocr_provider = ocr_provider or self._provider_registry.create_ocr_provider()
         self._extraction_provider = extraction_provider or self._provider_registry.create_extraction_provider()
         self._repository = repository or InMemoryPacketRepository()
@@ -75,6 +87,49 @@ class ClaimPacketWorkflowService:
 
     def list_packets(self) -> list[ClaimPacketRecord]:
         return self._repository.list_packets()
+
+    def list_review_queue(
+        self,
+        *,
+        assignee: str | None = None,
+        status: ReviewTaskStatus | None = ReviewTaskStatus.OPEN,
+        priority: ReviewTaskPriority | None = None,
+        due_before: datetime | None = None,
+        unassigned: bool = False,
+    ) -> list[ReviewTaskQueueItem]:
+        items: list[ReviewTaskQueueItem] = []
+        for packet in self._repository.list_packets():
+            for task in packet.review_tasks:
+                if status is not None and task.status != status:
+                    continue
+                if assignee is not None and task.assignee != assignee:
+                    continue
+                if unassigned and task.assignee is not None:
+                    continue
+                if priority is not None and task.priority != priority:
+                    continue
+                if due_before is not None and (task.due_at is None or task.due_at > due_before):
+                    continue
+                items.append(
+                    ReviewTaskQueueItem(
+                        packet_id=packet.id,
+                        claim_reference=packet.claim_reference,
+                        claimant_name=packet.claimant_name,
+                        loss_type=packet.loss_type,
+                        packet_status=packet.status,
+                        task=task,
+                    )
+                )
+
+        priority_rank = {
+            ReviewTaskPriority.URGENT: 0,
+            ReviewTaskPriority.HIGH: 1,
+            ReviewTaskPriority.NORMAL: 2,
+            ReviewTaskPriority.LOW: 3,
+        }
+        max_datetime = datetime.max.replace(tzinfo=timezone.utc)
+        items.sort(key=lambda item: (item.task.due_at is None, item.task.due_at or max_datetime, priority_rank[item.task.priority], item.task.created_at))
+        return items
 
     def add_document_to_packet(self, packet_id: UUID, document: ClaimDocumentCreate) -> ClaimPacketRecord:
         packet = self.get_packet(packet_id)
@@ -153,12 +208,8 @@ class ClaimPacketWorkflowService:
             raise WorkflowConflictError("Checklist must be evaluated before review.")
 
         if review.decision == ReviewDecision.APPROVE:
-            for task in packet.review_tasks:
-                if task.status == ReviewTaskStatus.OPEN:
-                    task.status = ReviewTaskStatus.RESOLVED
-                    task.resolved_at = utc_now()
-                    task.reviewer = review.reviewer
-                    task.notes = review.notes
+            if any(task.status == ReviewTaskStatus.OPEN for task in packet.review_tasks):
+                raise WorkflowConflictError("Open review tasks must be resolved before approval.")
             packet.status = PacketStatus.APPROVED
         else:
             if not any(task.status == ReviewTaskStatus.OPEN for task in packet.review_tasks):
@@ -172,6 +223,99 @@ class ClaimPacketWorkflowService:
             actor=review.reviewer,
             detail={"decision": review.decision.value, "notes": review.notes},
         )
+        return packet
+
+    def resolve_review_task(self, packet_id: UUID, task_id: UUID, reviewer: str, notes: str | None = None) -> ClaimPacketRecord:
+        packet = self.get_packet(packet_id)
+        task = self._get_review_task(packet, task_id)
+        previous_status = task.status
+        task.status = ReviewTaskStatus.RESOLVED
+        task.resolved_at = utc_now()
+        task.reviewer = reviewer
+        task.notes = notes
+        if packet.status == PacketStatus.EXPORTED:
+            packet.status = PacketStatus.APPROVED
+        packet.touch()
+        self._repository.save_packet(packet)
+        self._audit(
+            packet.id,
+            AuditAction.REVIEW_TASK_RESOLVED,
+            actor=reviewer,
+            detail={
+                "task_id": str(task.id),
+                "document_id": str(task.document_id) if task.document_id else None,
+                "reason": task.reason,
+                "previous_status": previous_status.value,
+                "status": task.status.value,
+                "notes": notes,
+            },
+        )
+        return packet
+
+    def reopen_review_task(self, packet_id: UUID, task_id: UUID, reviewer: str, notes: str | None = None) -> ClaimPacketRecord:
+        packet = self.get_packet(packet_id)
+        task = self._get_review_task(packet, task_id)
+        previous_status = task.status
+        task.status = ReviewTaskStatus.OPEN
+        task.resolved_at = None
+        task.reviewer = reviewer
+        task.notes = notes
+        if packet.status in {PacketStatus.APPROVED, PacketStatus.EXPORTED}:
+            packet.status = PacketStatus.NEEDS_REVIEW
+        packet.touch()
+        self._repository.save_packet(packet)
+        self._audit(
+            packet.id,
+            AuditAction.REVIEW_TASK_REOPENED,
+            actor=reviewer,
+            detail={
+                "task_id": str(task.id),
+                "document_id": str(task.document_id) if task.document_id else None,
+                "reason": task.reason,
+                "previous_status": previous_status.value,
+                "status": task.status.value,
+                "notes": notes,
+            },
+        )
+        return packet
+
+    def update_review_task(self, packet_id: UUID, task_id: UUID, actor: str, updates: dict[str, object]) -> ClaimPacketRecord:
+        packet = self.get_packet(packet_id)
+        task = self._get_review_task(packet, task_id)
+        previous_assignee = task.assignee
+        previous_priority = task.priority
+        previous_due_at = task.due_at
+        previous_notes = task.notes
+
+        if "assignee" in updates:
+            task.assignee = updates["assignee"]
+        if "priority" in updates and updates["priority"] is not None:
+            task.priority = updates["priority"]
+        if "due_at" in updates:
+            task.due_at = updates["due_at"]
+        if "notes" in updates:
+            task.notes = updates["notes"]
+
+        packet.touch()
+        self._repository.save_packet(packet)
+
+        detail = {
+            "task_id": str(task.id),
+            "document_id": str(task.document_id) if task.document_id else None,
+            "reason": task.reason,
+            "previous_assignee": previous_assignee,
+            "assignee": task.assignee,
+            "previous_priority": previous_priority.value,
+            "priority": task.priority.value,
+            "previous_due_at": previous_due_at.isoformat() if previous_due_at else None,
+            "due_at": task.due_at.isoformat() if task.due_at else None,
+            "previous_notes": previous_notes,
+            "notes": task.notes,
+        }
+        if previous_assignee != task.assignee:
+            self._audit(packet.id, AuditAction.REVIEW_TASK_ASSIGNED, actor=actor, detail=detail)
+        if previous_priority != task.priority or previous_due_at != task.due_at or previous_notes != task.notes:
+            self._audit(packet.id, AuditAction.REVIEW_TASK_UPDATED, actor=actor, detail=detail)
         return packet
 
     def correct_extracted_field(self, packet_id: UUID, document_id: UUID, field_name: str, correction: FieldCorrectionRequest) -> ClaimPacketRecord:
@@ -326,6 +470,12 @@ class ClaimPacketWorkflowService:
 
     def _field_count(self, packet: ClaimPacketRecord) -> int:
         return sum(len(document.extracted_fields) for document in packet.documents)
+
+    def _get_review_task(self, packet: ClaimPacketRecord, task_id: UUID) -> ReviewTask:
+        task = next((candidate for candidate in packet.review_tasks if candidate.id == task_id), None)
+        if task is None:
+            raise ReviewTaskNotFoundError(str(task_id))
+        return task
 
     def _audit(
         self,

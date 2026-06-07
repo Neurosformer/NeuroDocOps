@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from enum import Enum
 from typing import Mapping
 
 from pydantic import BaseModel, Field
 
+from packages.domain.neurodocops_domain.models import ClaimDocumentRecord
+
 from .insurance import (
     ExtractionProvider,
+    LocalPDFTextOCRProvider,
     MockOCRProvider,
     OCRProvider,
     RuleBasedInsuranceExtractionProvider,
@@ -61,6 +65,9 @@ class ProviderSelection(BaseModel):
 
 
 _IMPLEMENTED_OCR = {
+    "local": "LocalPDFTextOCRProvider",
+    "local-pdf-text": "LocalPDFTextOCRProvider",
+    "local_pdf_text": "LocalPDFTextOCRProvider",
     "mock": "MockOCRProvider",
     "mock-ocr": "MockOCRProvider",
 }
@@ -73,8 +80,6 @@ _IMPLEMENTED_EXTRACTION = {
 
 _KNOWN_OCR = {
     *_IMPLEMENTED_OCR,
-    "local",
-    "local_pdf_text",
     "paddle",
     "paddleocr",
     "surya",
@@ -131,15 +136,18 @@ class ProviderRegistry:
     names, but only current free/local adapters can be instantiated.
     """
 
-    def __init__(self, settings: ProviderSettings | None = None) -> None:
+    def __init__(self, settings: ProviderSettings | None = None, source_bytes_loader: Callable[[ClaimDocumentRecord], bytes | None] | None = None) -> None:
         self.settings = settings or load_provider_settings()
+        self._source_bytes_loader = source_bytes_loader
         self._validate_optional_provider_names()
 
     def create_ocr_provider(self) -> OCRProvider:
         name = _normalize(self.settings.ocr_provider)
         self._validate_ocr(name)
-        if name in _IMPLEMENTED_OCR:
+        if name in {"mock", "mock-ocr"}:
             return MockOCRProvider()
+        if name in {"local", "local_pdf_text", "local-pdf-text"}:
+            return LocalPDFTextOCRProvider(source_bytes_loader=self._source_bytes_loader)
         raise ProviderConfigError(f"OCR provider '{name}' is registered but no adapter is implemented yet.")
 
     def create_extraction_provider(self) -> ExtractionProvider:
@@ -162,6 +170,33 @@ class ProviderRegistry:
                 selection.kind.value: selection.model_dump(mode="json")
                 for selection in self.active_providers()
             },
+        }
+
+    def configuration_payload(self) -> dict[str, object]:
+        active = {selection.kind.value: selection.model_dump(mode="json") for selection in self.active_providers()}
+        return {
+            "mode": "read_only_environment_configuration",
+            "safety": {
+                "local_free_defaults": True,
+                "paid_live_providers_require_explicit_opt_in": True,
+                "runtime_mutation_supported": False,
+                "secrets_exposed": False,
+            },
+            "settings": {
+                "tier": self.settings.provider_tier.value,
+                "live_ocr_enabled": self.settings.live_ocr_enabled,
+                "max_live_ocr_pages": self.settings.max_live_ocr_pages,
+                "ocr_cache_enabled": self.settings.ocr_cache_enabled,
+            },
+            "slots": [
+                _slot("ocr", "OCR/document parsing", "NEURODOCOPS_OCR_PROVIDER", active["ocr"], _KNOWN_OCR, _PAID_OCR, "mock"),
+                _slot("extraction", "Extraction/reasoning", "NEURODOCOPS_EXTRACTION_PROVIDER", active["extraction"], _KNOWN_EXTRACTION, set(), "rule_based_insurance"),
+                _slot("reasoning", "Reasoning provider", "NEURODOCOPS_REASONING_PROVIDER", active["reasoning"], _KNOWN_OPTIONAL[ProviderKind.REASONING], _PAID_OPTIONAL[ProviderKind.REASONING], "none"),
+                _slot("search", "Search provider", "NEURODOCOPS_SEARCH_PROVIDER", active["search"], _KNOWN_OPTIONAL[ProviderKind.SEARCH], _PAID_OPTIONAL[ProviderKind.SEARCH], "none"),
+                _slot("auth", "Auth/identity provider", "NEURODOCOPS_AUTH_PROVIDER", active["auth"], _KNOWN_OPTIONAL[ProviderKind.AUTH], _PAID_OPTIONAL[ProviderKind.AUTH], "dev"),
+                _slot("telemetry", "Telemetry provider", "NEURODOCOPS_TELEMETRY_PROVIDER", active["telemetry"], _KNOWN_OPTIONAL[ProviderKind.TELEMETRY], _PAID_OPTIONAL[ProviderKind.TELEMETRY], "local"),
+                _slot("secrets", "Secrets/config provider", "NEURODOCOPS_SECRET_PROVIDER", active["secrets"], _KNOWN_OPTIONAL[ProviderKind.SECRETS], _PAID_OPTIONAL[ProviderKind.SECRETS], "env"),
+            ],
         }
 
     def active_providers(self) -> list[ProviderSelection]:
@@ -238,8 +273,8 @@ def load_provider_settings(environ: Mapping[str, str] | None = None) -> Provider
     )
 
 
-def create_provider_registry(settings: ProviderSettings | None = None) -> ProviderRegistry:
-    return ProviderRegistry(settings=settings)
+def create_provider_registry(settings: ProviderSettings | None = None, source_bytes_loader: Callable[[ClaimDocumentRecord], bytes | None] | None = None) -> ProviderRegistry:
+    return ProviderRegistry(settings=settings, source_bytes_loader=source_bytes_loader)
 
 
 def create_ocr_provider(settings: ProviderSettings | None = None) -> OCRProvider:
@@ -252,6 +287,23 @@ def create_extraction_provider(settings: ProviderSettings | None = None) -> Extr
 
 def get_provider_metadata(settings: ProviderSettings | None = None) -> dict[str, object]:
     return create_provider_registry(settings).ready_metadata()
+
+
+def get_provider_configuration(settings: ProviderSettings | None = None) -> dict[str, object]:
+    return create_provider_registry(settings).configuration_payload()
+
+
+def _slot(kind: str, label: str, env_var: str, active: dict[str, object], known: set[str], paid: set[str], safe_default: str) -> dict[str, object]:
+    return {
+        "kind": kind,
+        "label": label,
+        "env_var": env_var,
+        "safe_default": safe_default,
+        "active": active,
+        "known_values": sorted(known),
+        "paid_values": sorted(paid),
+        "implemented_values": [active["name"]] if active.get("implemented") else [],
+    }
 
 
 def _adapter_for(kind: ProviderKind, name: str) -> str | None:

@@ -313,7 +313,7 @@ The current product is directionally valid, but market readiness needs:
 1. Better packet source handling.
    Real PDF/image upload, preview, page-level citation, and downloaded source.
 2. Stronger correction workflow.
-   Field correction exists, but task-level review resolution still needs to be built.
+   Field correction, task-level review resolution, assignment metadata, priority/due dates, and filterable queue ownership now exist with audit-oriented workflow controls; SLA/escalation automation, notifications, and saved queue views remain.
 3. Structured export.
    Export should move toward stable schemas and eventually ACORD-aligned mappings where useful.
 4. Integration API.

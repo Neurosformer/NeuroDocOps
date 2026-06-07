@@ -36,6 +36,8 @@ The provider boundary is already present:
 
 Provider selection should be tiered rather than hardcoded. The proof-of-concept defaults to free/local providers; paid providers are opt-in. The long-term architecture supports `mock`, `local`, `paddle`, `surya`, `llamaparse`, `azure`, `aws`, `google`, and enterprise providers behind the same contracts. The full provider development plan is documented in `docs/pluggable-provider-development-plan.md`.
 
+For documentation purposes, "plugin facility" means configured service-boundary adapters, not a public third-party plugin marketplace. Implemented boundaries are `OCRProvider`, `ExtractionProvider`, `PacketRepository`, `ObjectStore`, `JobQueue`, and development RBAC. Roadmap boundaries include document parsing, reasoning, identity, search, intake, telemetry, secrets/config, and export delivery providers.
+
 ## Service Boundaries
 
 - `services/api`: control plane for tenant-scoped packet lifecycle, review, approval, export requests, and audit reads.
@@ -52,6 +54,8 @@ Provider selection should be tiered rather than hardcoded. The proof-of-concept 
 - `infra/postgres`: system of record for packet and audit snapshots when the Postgres repository is enabled.
 - `infra/redis`: queue/broker for packet-processing jobs.
 - `infra/minio`: source document storage now; future OCR artifact and export storage.
+
+See `docs/system-flow.md` for the end-to-end request/job/review/export flow and `docs/pluggable-provider-development-plan.md` for the provider/plugin matrix.
 
 ## Product Loop
 
@@ -71,10 +75,13 @@ POST /claim-packets
 GET  /claim-packets
 GET  /claim-packets/{packet_id}
 POST /claim-packets/{packet_id}/documents
+GET  /claim-packets/{packet_id}/documents/{document_id}/source
 POST /claim-packets/{packet_id}/classify
 POST /claim-packets/{packet_id}/extract
 POST /claim-packets/{packet_id}/checklist
 POST /claim-packets/{packet_id}/process
+POST /claim-packets/{packet_id}/review-tasks/{task_id}/resolve
+POST /claim-packets/{packet_id}/review-tasks/{task_id}/reopen
 POST /claim-packets/{packet_id}/review
 POST /claim-packets/{packet_id}/export
 GET  /jobs/{job_id}

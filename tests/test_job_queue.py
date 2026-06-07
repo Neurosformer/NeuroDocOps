@@ -1,8 +1,10 @@
 import pytest
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from neurodocops.models import ClaimDocumentCreate, ClaimPacketCreate, PacketStatus
 from neurodocops.service import ClaimPacketWorkflowService
 from packages.jobs.neurodocops_jobs import InMemoryJobQueue, JobEnvelope, JobProcessor, JobStatus, JobType, create_job_queue, process_next_job
+from packages.jobs.neurodocops_jobs.redis_queue import RedisJobQueue
 from packages.storage.neurodocops_storage import InMemoryPacketRepository
 
 
@@ -78,6 +80,21 @@ def test_job_queue_factory_rejects_unknown_backend(monkeypatch: pytest.MonkeyPat
 
     with pytest.raises(RuntimeError, match="Unsupported"):
         create_job_queue()
+
+
+def test_redis_job_queue_treats_idle_socket_timeout_as_no_job() -> None:
+    queue = object.__new__(RedisJobQueue)
+    queue._queue_name = "test"
+
+    class TimeoutRedis:
+        def brpop(self, queue_name: str, timeout: int):
+            assert queue_name == "test"
+            assert timeout == 5
+            raise RedisTimeoutError("Timeout reading from socket")
+
+    queue._redis = TimeoutRedis()
+
+    assert queue.dequeue(timeout_seconds=5) is None
 
 
 def _service(repository: InMemoryPacketRepository | None = None) -> ClaimPacketWorkflowService:
