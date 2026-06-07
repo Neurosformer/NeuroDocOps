@@ -6,6 +6,8 @@ Date: 2026-06-06
 
 NeuroDocOps should **not** continue as a broad "AI document operations platform for regulated workflows" right now.
 
+The detailed market validation, buyer analysis, role model, market signals, and go-to-market wedge are documented in `docs/market-validation.md`.
+
 NeuroDocOps **does make sense** if narrowed into a very specific product/service:
 
 > Claims packet evidence operations for insurance and medical-claims review teams: upload messy claim packets, classify documents, extract facts with citations, check completeness, route exceptions to human reviewers, require approval, export structured data, and preserve an audit trail.

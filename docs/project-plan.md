@@ -4,6 +4,8 @@
 
 NeuroDocOps should focus on insurance claims packet operations, not generic OCR or PDF chat. The MVP is a reviewer workspace and API that turns a multi-document claim packet into classified documents, extracted fields with citations, completeness checks, review tasks, human approval, export, and audit history.
 
+The market validation and positioning rationale are documented in `docs/market-validation.md`. Treat that document as the source of truth for why this product should stay focused on claims evidence operations instead of becoming a generic AI document dashboard.
+
 ## Build Now
 
 1. Enforce the regulated workflow boundary: no export until a packet is approved and review tasks are resolved.

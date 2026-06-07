@@ -45,6 +45,8 @@ NeuroDocOps provides an AI-powered document operations workflow that can ingest 
 
 The first product wedge is **Insurance Claims Packet Ops**. It focuses on claim packets that contain claim forms, incident reports, identity evidence, medical bills, repair invoices, policy documents, photos, and correspondence.
 
+The product and market rationale are documented in `docs/market-validation.md`. The short version: NeuroDocOps should win as a human-in-the-loop claims evidence operations layer, not as a generic OCR or AI document dashboard.
+
 The MVP workflow:
 
 1. Intake a claim packet with claim metadata and source documents
